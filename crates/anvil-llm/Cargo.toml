@@ -1,0 +1,20 @@
+[package]
+name = "anvil-llm"
+version = "0.1.0"
+description = "OpenAI-compatible API client with streaming SSE and token counting"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anvil-config = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }

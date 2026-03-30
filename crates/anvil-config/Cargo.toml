@@ -1,0 +1,19 @@
+[package]
+name = "anvil-config"
+version = "0.1.0"
+description = "TOML config, .anvil/ harness directory, provider settings"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
+serde_yaml = "0.9.34"
+
+[dev-dependencies]
+tempfile = { workspace = true }

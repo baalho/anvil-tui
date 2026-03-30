@@ -1,0 +1,28 @@
+# Build artifacts
+/target
+*.swp
+*.swo
+
+# IDE / Editor
+.vscode/
+.idea/
+*.iml
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Environment-specific (never commit)
+.devcontainer/
+.ona/
+.env
+.env.*
+
+# Anvil harness (project-specific, created by `anvil init`)
+# Users create their own via `anvil init` — don't ship ours
+.anvil/
+
+# OS temp files
+Thumbs.db
+*~

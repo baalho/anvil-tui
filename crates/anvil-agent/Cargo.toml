@@ -1,0 +1,24 @@
+[package]
+name = "anvil-agent"
+version = "0.1.0"
+description = "Agent loop: prompt → LLM → parse tool calls → confirm → execute → respond"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anvil-config = { workspace = true }
+anvil-llm = { workspace = true }
+anvil-tools = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+rusqlite = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+serde_yaml = "0.9.34"
+
+[dev-dependencies]
+tempfile = { workspace = true }

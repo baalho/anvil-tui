@@ -1,0 +1,28 @@
+[package]
+name = "anvil"
+version = "0.1.0"
+description = "CLI binary with TUI for the Anvil coding agent"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "anvil"
+path = "src/main.rs"
+
+[dependencies]
+anvil-config = { workspace = true }
+anvil-llm = { workspace = true }
+anvil-tools = { workspace = true }
+anvil-agent = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+crossterm = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ctrlc = "3.5.2"
+reqwest.workspace = true
+tokio-util.workspace = true

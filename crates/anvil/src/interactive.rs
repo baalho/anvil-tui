@@ -1,0 +1,300 @@
+use anvil_agent::{Agent, AgentEvent};
+use anvil_llm::TokenUsage;
+use anvil_tools::PermissionDecision;
+use anyhow::Result;
+use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
+use crossterm::{execute, terminal};
+use std::io::{self, BufRead, Write};
+use tokio::sync::mpsc;
+
+use crate::commands::{self, CommandResult};
+
+pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> Result<()> {
+    print_banner(&agent);
+
+    if let Some(summary) = session_summary {
+        println!("{summary}");
+        println!();
+    }
+
+    let stdin = io::stdin();
+    let mut cumulative_usage = TokenUsage::default();
+    let mut agent_slot: Option<Agent> = Some(agent);
+
+    loop {
+        let agent = agent_slot.as_mut().expect("agent lost");
+
+        execute!(
+            io::stdout(),
+            SetForegroundColor(Color::Green),
+            Print("you> "),
+            ResetColor,
+        )?;
+        io::stdout().flush()?;
+
+        let input = match read_input(&stdin) {
+            Some(input) => input,
+            None => break,
+        };
+
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with('/') {
+            match commands::handle_command(trimmed, agent, &cumulative_usage).await {
+                CommandResult::Handled(output) => {
+                    if !output.is_empty() {
+                        println!("{output}");
+                    }
+                    continue;
+                }
+                CommandResult::Exit => break,
+                CommandResult::Unknown(cmd) => {
+                    eprintln!("unknown command: {cmd} — try /help");
+                    continue;
+                }
+            }
+        }
+
+        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(64);
+        let (perm_tx, perm_rx) = mpsc::channel::<PermissionDecision>(1);
+
+        let prompt_owned = trimmed.to_string();
+        let mut moved_agent = agent_slot.take().unwrap();
+        let turn_handle = tokio::spawn(async move {
+            let result = moved_agent.turn(&prompt_owned, &event_tx, perm_rx).await;
+            (moved_agent, result)
+        });
+
+        let mut needs_newline = false;
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                AgentEvent::ContentDelta(text) => {
+                    if !needs_newline {
+                        execute!(
+                            io::stdout(),
+                            SetForegroundColor(Color::Cyan),
+                            Print("anvil> "),
+                            ResetColor,
+                        )?;
+                        needs_newline = true;
+                    }
+                    print!("{text}");
+                    io::stdout().flush()?;
+                }
+                AgentEvent::ToolCallPending {
+                    name, arguments, ..
+                } => {
+                    if needs_newline {
+                        println!();
+                        needs_newline = false;
+                    }
+                    let short_args = truncate_display(&arguments, 80);
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::Yellow),
+                        Print(format!("  [tool: {name}({short_args})]\n")),
+                        ResetColor,
+                    )?;
+
+                    let decision = prompt_permission(&name, &arguments)?;
+                    let _ = perm_tx.send(decision).await;
+                }
+                AgentEvent::ToolResult { name, result } => {
+                    let lines = result.lines().count();
+                    let chars = result.len();
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::DarkGrey),
+                        Print(format!("  [{name}: {lines} lines, {chars} chars]\n")),
+                        ResetColor,
+                    )?;
+                }
+                AgentEvent::Usage(u) => {
+                    cumulative_usage.prompt_tokens += u.prompt_tokens;
+                    cumulative_usage.completion_tokens += u.completion_tokens;
+                    cumulative_usage.total_tokens += u.total_tokens;
+                }
+                AgentEvent::TurnComplete => {
+                    if needs_newline {
+                        println!();
+                        needs_newline = false;
+                    }
+                    println!();
+                }
+                AgentEvent::Retry {
+                    attempt,
+                    max,
+                    delay_secs,
+                } => {
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::DarkYellow),
+                        Print(format!(
+                            "  [retrying in {delay_secs:.1}s... (attempt {attempt}/{max})]\n"
+                        )),
+                        ResetColor,
+                    )?;
+                }
+                AgentEvent::LoopDetected { tool_name, count } => {
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::Red),
+                        Print(format!("  [loop detected: {tool_name} x{count}]\n")),
+                        ResetColor,
+                    )?;
+                }
+                AgentEvent::ContextWarning {
+                    estimated_tokens,
+                    limit,
+                } => {
+                    let pct = (estimated_tokens * 100) / limit;
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::DarkYellow),
+                        Print(format!(
+                            "  [context: ~{estimated_tokens}/{limit} tokens ({pct}%)]\n"
+                        )),
+                        ResetColor,
+                    )?;
+                }
+                AgentEvent::Error(e) => {
+                    if needs_newline {
+                        println!();
+                        needs_newline = false;
+                    }
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::Red),
+                        Print(format!("error: {e}\n")),
+                        ResetColor,
+                    )?;
+                }
+            }
+        }
+
+        match turn_handle.await {
+            Ok((returned_agent, result)) => {
+                agent_slot = Some(returned_agent);
+                if let Err(e) = result {
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::Red),
+                        Print(format!("error: {e}\n")),
+                        ResetColor,
+                    )?;
+                }
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("agent task panicked: {e}"));
+            }
+        }
+    }
+
+    if let Some(agent) = agent_slot {
+        agent.pause_session()?;
+    }
+    println!("Session paused. Resume with: anvil --continue");
+
+    Ok(())
+}
+
+fn print_banner(agent: &Agent) {
+    println!("╭─────────────────────────────────────╮");
+    println!("│  Anvil — local coding agent         │");
+    println!("╰─────────────────────────────────────╯");
+    println!("  model:   {}", agent.model());
+    println!("  session: {}", &agent.session_id()[..8]);
+    println!("  cwd:     {}", agent.workspace().display());
+    println!("  type /help for commands");
+    println!();
+}
+
+fn read_input(stdin: &io::Stdin) -> Option<String> {
+    let mut full_input = String::new();
+    let reader = stdin.lock();
+
+    for line in reader.lines() {
+        match line {
+            Ok(line) => {
+                if line.ends_with('\\') {
+                    full_input.push_str(&line[..line.len() - 1]);
+                    full_input.push('\n');
+                    // Print continuation prompt
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::Green),
+                        Print("...  "),
+                        ResetColor,
+                    )
+                    .ok();
+                    io::stdout().flush().ok();
+                    continue;
+                }
+                full_input.push_str(&line);
+                return Some(full_input);
+            }
+            Err(_) => return None,
+        }
+    }
+
+    if full_input.is_empty() {
+        None
+    } else {
+        Some(full_input)
+    }
+}
+
+fn prompt_permission(tool_name: &str, arguments: &str) -> Result<PermissionDecision> {
+    let short_args = truncate_display(arguments, 60);
+    execute!(
+        io::stdout(),
+        SetForegroundColor(Color::Yellow),
+        Print(format!("  Allow {tool_name}({short_args})? [y/n/a] ")),
+        ResetColor,
+    )?;
+    io::stdout().flush()?;
+
+    // Read single keypress using crossterm raw mode
+    terminal::enable_raw_mode()?;
+    let decision = loop {
+        if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
+            match key.code {
+                crossterm::event::KeyCode::Char('y' | 'Y') => {
+                    break PermissionDecision::Allow;
+                }
+                crossterm::event::KeyCode::Char('n' | 'N') => {
+                    break PermissionDecision::Deny;
+                }
+                crossterm::event::KeyCode::Char('a' | 'A') => {
+                    break PermissionDecision::AllowAlways;
+                }
+                crossterm::event::KeyCode::Enter => {
+                    break PermissionDecision::Allow;
+                }
+                _ => {}
+            }
+        }
+    };
+    terminal::disable_raw_mode()?;
+
+    let label = match &decision {
+        PermissionDecision::Allow => "yes",
+        PermissionDecision::Deny => "no",
+        PermissionDecision::AllowAlways => "always",
+    };
+    println!("{label}");
+
+    Ok(decision)
+}
+
+fn truncate_display(s: &str, max: usize) -> String {
+    let oneline = s.replace('\n', " ").replace('\r', "");
+    if oneline.len() <= max {
+        oneline
+    } else {
+        format!("{}...", &oneline[..max])
+    }
+}
