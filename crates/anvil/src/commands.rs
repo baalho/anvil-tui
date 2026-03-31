@@ -54,7 +54,10 @@ pub async fn handle_command(
         "/clear" => CommandResult::Compact,
         "/think" => CommandResult::Handled(think_command(agent)),
         "/memory" => CommandResult::Handled(memory_command(agent, arg)),
+        "/route" => CommandResult::Handled(route_command(agent, arg)),
         "/skill" => CommandResult::Handled(skill_command(agent, arg)),
+        "/mcp" => CommandResult::Handled(mcp_command(agent, arg).await),
+        "/persona" => CommandResult::Handled(persona_command(agent, arg)),
         _ => CommandResult::Unknown(cmd.to_string()),
     }
 }
@@ -75,15 +78,54 @@ fn help_text() -> String {
         "  /ralph <prompt> --verify <cmd> Run autonomous mode (Ralph Loop)",
         "  /clear                       Compact conversation context",
         "  /think                       Toggle <think> block visibility",
+        "  /route [tool model]          Show or set model routing",
+        "  /memory                      List stored patterns",
         "  /memory                      List stored patterns",
         "  /memory add <pattern>        Save a new pattern",
+        "  /memory add category:<t> <p> Save with category (convention|gotcha|pattern)",
+        "  /memory search <keyword>     Search memories",
+        "  /memory rm <filename>        Remove one entry",
         "  /memory clear                Remove all patterns",
+        "  /mcp                         List MCP servers and tools",
+        "  /persona [name]              List or activate a character persona",
+        "  /persona clear               Deactivate persona",
         "  /end                         End session and exit",
     ]
     .join("\n")
 }
 
+fn route_command(agent: &mut Agent, arg: &str) -> String {
+    if arg.is_empty() {
+        let routes = agent.router().routes();
+        if routes.is_empty() {
+            return "no routes configured. usage: /route <tool> <model>".to_string();
+        }
+        let mut output = String::from("model routes:\n");
+        for (tool, model) in routes {
+            output.push_str(&format!("  {tool} → {model}\n"));
+        }
+        return output;
+    }
+
+    if arg == "clear" {
+        *agent.router_mut() = anvil_agent::ModelRouter::new();
+        return "all routes cleared".to_string();
+    }
+
+    let parts: Vec<&str> = arg.splitn(2, ' ').collect();
+    if parts.len() < 2 {
+        return "usage: /route <tool> <model> or /route clear".to_string();
+    }
+
+    let tool = parts[0];
+    let model = parts[1].trim();
+    agent.router_mut().add_route(tool, model);
+    format!("{tool} → {model}")
+}
+
 fn memory_command(agent: &Agent, arg: &str) -> String {
+    use anvil_agent::memory::MemoryCategory;
+
     let memory_dir = agent.workspace().join(".anvil/memory");
     let store = MemoryStore::new(memory_dir);
 
@@ -94,18 +136,42 @@ fn memory_command(agent: &Agent, arg: &str) -> String {
         }
         let mut output = format!("{} stored pattern(s):\n", entries.len());
         for entry in &entries {
-            output.push_str(&format!("\n  [{}]\n  {}\n", entry.filename, entry.content));
+            output.push_str(&format!(
+                "\n  [{}] ({})\n  {}\n",
+                entry.filename,
+                entry.category.label(),
+                entry.content
+            ));
         }
         return output;
     }
 
-    if let Some(pattern) = arg.strip_prefix("add ") {
-        let pattern = pattern.trim();
-        if pattern.is_empty() {
-            return "usage: /memory add <pattern>".to_string();
+    // /memory add [category:tag] <pattern>
+    if let Some(rest) = arg.strip_prefix("add ") {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return "usage: /memory add <pattern> or /memory add category:<tag> <pattern>"
+                .to_string();
         }
-        match store.add(pattern) {
-            Ok(filename) => format!("saved: {filename}"),
+
+        let (category, pattern) = if let Some(tagged) = rest.strip_prefix("category:") {
+            let parts: Vec<&str> = tagged.splitn(2, ' ').collect();
+            if parts.len() < 2 || parts[1].trim().is_empty() {
+                return "usage: /memory add category:<tag> <pattern>".to_string();
+            }
+            (
+                Some(MemoryCategory::from_tag(parts[0])),
+                parts[1].trim().to_string(),
+            )
+        } else {
+            (None, rest.to_string())
+        };
+
+        match store.add_with_category(&pattern, category.as_ref()) {
+            Ok(filename) => {
+                let cat_label = category.as_ref().map(|c| c.label()).unwrap_or("Note");
+                format!("saved ({cat_label}): {filename}")
+            }
             Err(e) => format!("failed to save: {e}"),
         }
     } else if arg == "clear" {
@@ -113,8 +179,128 @@ fn memory_command(agent: &Agent, arg: &str) -> String {
             Ok(count) => format!("removed {count} pattern(s)"),
             Err(e) => format!("failed to clear: {e}"),
         }
+    } else if let Some(query) = arg.strip_prefix("search ") {
+        let query = query.trim();
+        if query.is_empty() {
+            return "usage: /memory search <keyword>".to_string();
+        }
+        let results = store.search(query);
+        if results.is_empty() {
+            format!("no memories matching '{query}'")
+        } else {
+            let mut output = format!("{} match(es) for '{query}':\n", results.len());
+            for entry in &results {
+                output.push_str(&format!(
+                    "\n  [{}] ({})\n  {}\n",
+                    entry.filename,
+                    entry.category.label(),
+                    entry.content
+                ));
+            }
+            output
+        }
+    } else if let Some(filename) = arg.strip_prefix("rm ") {
+        let filename = filename.trim();
+        match store.remove(filename) {
+            Ok(true) => format!("removed: {filename}"),
+            Ok(false) => format!("not found: {filename}"),
+            Err(e) => format!("failed to remove: {e}"),
+        }
     } else {
-        "usage: /memory, /memory add <pattern>, /memory clear".to_string()
+        [
+            "usage:",
+            "  /memory                          list all",
+            "  /memory add <pattern>            save a note",
+            "  /memory add category:<tag> <pat>  save with category (convention|gotcha|pattern)",
+            "  /memory search <keyword>         search by keyword",
+            "  /memory rm <filename>            remove one entry",
+            "  /memory clear                    remove all",
+        ]
+        .join("\n")
+    }
+}
+
+/// Handle `/mcp` — show connected MCP servers and their tools.
+async fn mcp_command(agent: &Agent, arg: &str) -> String {
+    let mcp = agent.mcp();
+    let status = mcp.server_status().await;
+
+    if status.is_empty() && arg.is_empty() {
+        return "no MCP servers configured. add servers in .anvil/config.toml under [mcp]"
+            .to_string();
+    }
+
+    if arg.is_empty() {
+        // List servers and tools
+        let mut output = format!("{} MCP server(s):\n", status.len());
+        for (name, tool_count, alive) in &status {
+            let state = if *alive { "connected" } else { "disconnected" };
+            output.push_str(&format!("\n  {name} ({state}, {tool_count} tools)"));
+        }
+
+        let tools = mcp.tools().await;
+        if !tools.is_empty() {
+            output.push_str("\n\ntools:");
+            for tool in &tools {
+                output.push_str(&format!(
+                    "\n  {} — {}",
+                    tool.qualified_name, tool.description
+                ));
+            }
+        }
+
+        return output;
+    }
+
+    if arg == "shutdown" {
+        mcp.shutdown().await;
+        return "all MCP servers shut down".to_string();
+    }
+
+    format!("unknown subcommand '{arg}'. usage: /mcp, /mcp shutdown")
+}
+
+/// Handle `/persona` — list, activate, or deactivate character personas.
+fn persona_command(agent: &mut Agent, arg: &str) -> String {
+    if arg.is_empty() {
+        let personas = anvil_agent::builtin_personas();
+        let active = agent.persona().map(|p| p.key.as_str());
+
+        let mut output = String::from("character personas:\n");
+        for p in &personas {
+            let marker = if active == Some(&p.key) { " *" } else { "" };
+            output.push_str(&format!("\n  {}{} — {}", p.key, marker, p.description));
+        }
+        if active.is_some() {
+            output.push_str("\n\n  (* = active)");
+        }
+        output.push_str("\n\nusage: /persona <name> or /persona clear");
+        return output;
+    }
+
+    if arg == "clear" {
+        agent.set_persona(None);
+        return "persona deactivated".to_string();
+    }
+
+    match anvil_agent::find_persona(arg) {
+        Some(persona) => {
+            let greeting = persona.greeting.clone();
+            let name = persona.name.clone();
+            agent.set_persona(Some(persona));
+            format!("{name} activated!\n\n{greeting}")
+        }
+        None => {
+            let available: Vec<String> = anvil_agent::builtin_personas()
+                .iter()
+                .map(|p| p.key.clone())
+                .collect();
+            format!(
+                "unknown persona '{}'. available: {}",
+                arg,
+                available.join(", ")
+            )
+        }
     }
 }
 
@@ -131,21 +317,40 @@ fn think_command(agent: &mut Agent) -> String {
 fn stats_text(agent: &Agent, usage: &TokenUsage) -> String {
     let u = usage;
     let msg_count = agent.messages().len();
+    let cost_str = match u.estimated_cost_usd {
+        Some(c) if c > 0.0 => format!("${c:.4}"),
+        _ => "$0.00 (local)".to_string(),
+    };
     let mut text = format!(
         "session:     {}\n\
          model:       {}\n\
          backend:     {}\n\
          messages:    {msg_count}\n\
+         requests:    {}\n\
          tokens:      {} prompt + {} completion = {} total\n\
-         cost:        ${:.4}",
+         cost:        {cost_str}",
         &agent.session_id()[..8],
         agent.model(),
         agent.backend(),
+        u.request_count,
         u.prompt_tokens,
         u.completion_tokens,
         u.total_tokens,
-        u.estimated_cost_usd.unwrap_or(0.0),
     );
+
+    // Show model routes if any are configured
+    let routes = agent.router().routes();
+    if !routes.is_empty() {
+        let route_strs: Vec<String> = routes
+            .iter()
+            .map(|(tool, model)| format!("{tool} → {model}"))
+            .collect();
+        text.push_str(&format!("\nroutes:      {}", route_strs.join(", ")));
+    }
+
+    if agent.show_thinking() {
+        text.push_str("\nthinking:    visible");
+    }
 
     let extra = agent.extra_env();
     if !extra.is_empty() {
@@ -175,7 +380,10 @@ async fn model_command(agent: &mut Agent, arg: &str) -> String {
                 info.push_str(&format!("\n  repeat_penalty: {r}"));
             }
             if profile.context.default_window > 0 {
-                info.push_str(&format!("\n  context_window: {}", profile.context.default_window));
+                info.push_str(&format!(
+                    "\n  context_window: {}",
+                    profile.context.default_window
+                ));
             }
         } else {
             info.push_str("\nprofile: (none)");
@@ -189,7 +397,10 @@ async fn model_command(agent: &mut Agent, arg: &str) -> String {
     let model_name = if models.is_empty() {
         // Can't discover — just set the model directly
         arg.to_string()
-    } else if models.iter().any(|m| m == arg || m.starts_with(&format!("{arg}:"))) {
+    } else if models
+        .iter()
+        .any(|m| m == arg || m.starts_with(&format!("{arg}:")))
+    {
         if models.contains(&arg.to_string()) {
             arg.to_string()
         } else {
@@ -720,4 +931,3 @@ mod tests {
         }
     }
 }
-

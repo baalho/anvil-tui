@@ -15,6 +15,9 @@ pub enum StreamEvent {
     },
     /// Final usage statistics (sent with the last chunk).
     Usage(ApiUsage),
+    /// Mid-stream error (e.g. backend disconnection). The agent can decide
+    /// whether to retry or surface the error to the user.
+    Error(String),
     /// Stream finished.
     Done,
 }

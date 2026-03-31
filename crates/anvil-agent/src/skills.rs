@@ -27,8 +27,9 @@
 //! the first non-empty line becomes the description, and everything after the heading
 //! is the prompt content.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// A parsed skill with metadata and prompt content.
@@ -56,6 +57,9 @@ pub struct Skill {
     /// Shell command to verify the skill's prerequisites are met.
     /// Run via `/skill verify <name>`. Exit 0 = pass, non-zero = fail.
     pub verify_command: Option<String>,
+    /// Other skill keys this skill depends on.
+    /// Activating this skill auto-activates all dependencies.
+    pub depends: Vec<String>,
 }
 
 /// YAML frontmatter structure, deserialized from the `---` block.
@@ -71,6 +75,10 @@ struct Frontmatter {
     #[serde(default)]
     env: Vec<String>,
     verify: Option<String>,
+    /// Other skills this one depends on. Activating this skill
+    /// auto-activates all dependencies (transitively).
+    #[serde(default)]
+    depends: Vec<String>,
 }
 
 /// Scans `.anvil/skills/` and loads all valid skill files.
@@ -119,6 +127,39 @@ impl SkillLoader {
         }
         parse_skill_file(&path)
     }
+
+    /// Resolve transitive dependencies for a skill.
+    /// Returns the list of skill keys to activate (including the skill itself),
+    /// in dependency-first order. Detects circular dependencies.
+    pub fn resolve_dependencies(&self, key: &str) -> Result<Vec<String>> {
+        let mut resolved = Vec::new();
+        let mut visiting = HashSet::new();
+        self.resolve_recursive(key, &mut resolved, &mut visiting)?;
+        Ok(resolved)
+    }
+
+    fn resolve_recursive(
+        &self,
+        key: &str,
+        resolved: &mut Vec<String>,
+        visiting: &mut HashSet<String>,
+    ) -> Result<()> {
+        if resolved.contains(&key.to_string()) {
+            return Ok(());
+        }
+        if !visiting.insert(key.to_string()) {
+            bail!("circular dependency detected: {key}");
+        }
+
+        let skill = self.get(key)?;
+        for dep in &skill.depends {
+            self.resolve_recursive(dep, resolved, visiting)?;
+        }
+
+        visiting.remove(key);
+        resolved.push(key.to_string());
+        Ok(())
+    }
 }
 
 /// Parse a skill file, extracting optional YAML frontmatter and markdown content.
@@ -155,6 +196,7 @@ fn parse_skill_file(path: &Path) -> Result<Skill> {
         tags: fm.tags,
         required_env: fm.env,
         verify_command: fm.verify,
+        depends: fm.depends,
     })
 }
 
@@ -407,6 +449,66 @@ Use docker commands to manage containers.
         assert_eq!(skill.name, "Still Works");
         assert!(skill.category.is_none());
         assert!(skill.content.contains("Content here"));
+    }
+
+    #[test]
+    fn resolve_dependencies_transitive() {
+        let dir = TempDir::new().unwrap();
+        let skills_dir = dir.path().join(".anvil").join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+
+        std::fs::write(
+            skills_dir.join("a.md"),
+            "---\ndepends: [b]\n---\n# A\n\nSkill A.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skills_dir.join("b.md"),
+            "---\ndepends: [c]\n---\n# B\n\nSkill B.\n",
+        )
+        .unwrap();
+        std::fs::write(skills_dir.join("c.md"), "# C\n\nSkill C.\n").unwrap();
+
+        let loader = SkillLoader::new(dir.path());
+        let deps = loader.resolve_dependencies("a").unwrap();
+        assert_eq!(deps, vec!["c", "b", "a"]);
+    }
+
+    #[test]
+    fn resolve_dependencies_circular_detected() {
+        let dir = TempDir::new().unwrap();
+        let skills_dir = dir.path().join(".anvil").join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+
+        std::fs::write(
+            skills_dir.join("x.md"),
+            "---\ndepends: [y]\n---\n# X\n\nSkill X.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skills_dir.join("y.md"),
+            "---\ndepends: [x]\n---\n# Y\n\nSkill Y.\n",
+        )
+        .unwrap();
+
+        let loader = SkillLoader::new(dir.path());
+        let result = loader.resolve_dependencies("x");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("circular"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_dependencies_no_deps() {
+        let dir = TempDir::new().unwrap();
+        let skills_dir = dir.path().join(".anvil").join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+
+        std::fs::write(skills_dir.join("solo.md"), "# Solo\n\nNo deps.\n").unwrap();
+
+        let loader = SkillLoader::new(dir.path());
+        let deps = loader.resolve_dependencies("solo").unwrap();
+        assert_eq!(deps, vec!["solo"]);
     }
 
     #[test]

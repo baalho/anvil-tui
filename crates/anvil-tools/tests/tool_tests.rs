@@ -1,11 +1,49 @@
 use anvil_tools::ToolExecutor;
 use serde_json::json;
 use std::fs;
+use std::process::Command;
 use tempfile::TempDir;
 
 fn setup() -> (TempDir, ToolExecutor) {
     let dir = TempDir::new().unwrap();
     let executor = ToolExecutor::new(dir.path().to_path_buf(), 10, 10_000);
+    (dir, executor)
+}
+
+/// Create a temp dir with an initialized git repo and one commit.
+fn setup_git() -> (TempDir, ToolExecutor) {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path();
+
+    Command::new("git")
+        .args(["init"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+
+    fs::write(path.join("README.md"), "# Test\n").unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+
+    let executor = ToolExecutor::new(path.to_path_buf(), 10, 10_000);
     (dir, executor)
 }
 
@@ -183,9 +221,11 @@ async fn shell_per_call_timeout() {
         .execute("shell", &json!({"command": "timeout /t 60", "timeout": 1}))
         .await;
 
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(err.contains("timed out"));
+    // Timeout returns Ok with an error message (not Err), so the LLM
+    // gets the timeout info as a tool result for self-correction.
+    let output = result.unwrap();
+    assert!(output.contains("timed out"), "got: {output}");
+    assert!(output.contains("killed"), "got: {output}");
 }
 
 #[tokio::test]
@@ -351,4 +391,367 @@ async fn unknown_tool_fails() {
     let (_, executor) = setup();
     let result = executor.execute("nonexistent", &json!({})).await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn validate_missing_required_args() {
+    let (_, executor) = setup();
+
+    // file_read requires "path"
+    let result = executor.execute("file_read", &json!({})).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("missing required"), "got: {err}");
+    assert!(err.contains("path"), "got: {err}");
+
+    // file_write requires "path" and "content"
+    let result = executor
+        .execute("file_write", &json!({"path": "test.txt"}))
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("content"), "got: {err}");
+
+    // shell requires "command"
+    let result = executor.execute("shell", &json!({})).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("command"), "got: {err}");
+}
+
+#[tokio::test]
+async fn validate_empty_string_args_rejected() {
+    let (_, executor) = setup();
+
+    let result = executor.execute("file_read", &json!({"path": ""})).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("missing required"), "got: {err}");
+}
+
+#[tokio::test]
+async fn validate_null_args_rejected() {
+    let (_, executor) = setup();
+
+    let result = executor.execute("shell", &json!({"command": null})).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("missing required"), "got: {err}");
+}
+
+// === File cache tests ===
+
+#[tokio::test]
+async fn file_cache_invalidated_on_write() {
+    let (dir, executor) = setup();
+    let path = dir.path().join("cached.txt");
+    fs::write(&path, "original").unwrap();
+
+    let r1 = executor
+        .execute("file_read", &json!({"path": "cached.txt"}))
+        .await
+        .unwrap();
+    assert!(r1.contains("original"));
+
+    executor
+        .execute(
+            "file_write",
+            &json!({"path": "cached.txt", "content": "updated"}),
+        )
+        .await
+        .unwrap();
+
+    let r2 = executor
+        .execute("file_read", &json!({"path": "cached.txt"}))
+        .await
+        .unwrap();
+    assert!(r2.contains("updated"), "got: {r2}");
+}
+
+#[tokio::test]
+async fn file_cache_invalidated_on_edit() {
+    let (dir, executor) = setup();
+    fs::write(dir.path().join("edit_me.txt"), "hello world").unwrap();
+
+    let _ = executor
+        .execute("file_read", &json!({"path": "edit_me.txt"}))
+        .await
+        .unwrap();
+
+    executor
+        .execute(
+            "file_edit",
+            &json!({"path": "edit_me.txt", "old_str": "hello", "new_str": "goodbye"}),
+        )
+        .await
+        .unwrap();
+
+    let result = executor
+        .execute("file_read", &json!({"path": "edit_me.txt"}))
+        .await
+        .unwrap();
+    assert!(result.contains("goodbye"), "got: {result}");
+}
+
+// === Permission handler tests ===
+
+#[test]
+fn is_read_only_classification() {
+    use anvil_tools::PermissionHandler;
+
+    assert!(PermissionHandler::is_read_only("file_read"));
+    assert!(PermissionHandler::is_read_only("grep"));
+    assert!(PermissionHandler::is_read_only("ls"));
+    assert!(PermissionHandler::is_read_only("find"));
+
+    assert!(!PermissionHandler::is_read_only("shell"));
+    assert!(!PermissionHandler::is_read_only("file_write"));
+    assert!(!PermissionHandler::is_read_only("file_edit"));
+    assert!(!PermissionHandler::is_read_only("unknown_tool"));
+}
+
+// === Plugin template rendering tests ===
+
+#[test]
+fn plugin_render_numeric_args() {
+    let plugin: anvil_tools::ToolPlugin = toml::from_str(
+        r#"
+        name = "scale"
+        description = "Scale by factor"
+        [[params]]
+        name = "factor"
+        type = "number"
+        required = true
+        [command]
+        template = "scale --factor {{factor}}"
+        "#,
+    )
+    .unwrap();
+
+    let cmd = plugin.render_command(&json!({"factor": 2.5})).unwrap();
+    assert_eq!(cmd, "scale --factor 2.5");
+}
+
+#[test]
+fn plugin_render_missing_arg_leaves_placeholder() {
+    let plugin: anvil_tools::ToolPlugin = toml::from_str(
+        r#"
+        name = "greet"
+        description = "Greet"
+        [command]
+        template = "echo {{name}}"
+        "#,
+    )
+    .unwrap();
+
+    let cmd = plugin.render_command(&json!({})).unwrap();
+    assert_eq!(cmd, "echo {{name}}");
+}
+
+// === Hook tests ===
+
+#[tokio::test]
+async fn post_hook_runs_after_tool() {
+    let dir = TempDir::new().unwrap();
+    let hooks_dir = dir.path().join("hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
+    fs::write(
+        hooks_dir.join("post-file_write.sh"),
+        "#!/bin/sh\necho post-hook-executed",
+    )
+    .unwrap();
+
+    let runner = anvil_tools::HookRunner::new(hooks_dir);
+    let result = runner.run_post_hook("file_write").await;
+    assert!(result.ran);
+    assert!(result.success);
+    assert!(result.output.contains("post-hook-executed"));
+}
+
+#[tokio::test]
+async fn hook_nonexistent_dir_is_safe() {
+    let runner = anvil_tools::HookRunner::new(std::path::PathBuf::from("/nonexistent/hooks"));
+    let result = runner.run_pre_hook("shell").await;
+    assert!(!result.ran);
+    assert!(result.success);
+}
+
+// === Validation edge cases ===
+
+#[tokio::test]
+async fn validate_numeric_args_accepted() {
+    let (dir, executor) = setup();
+    fs::write(dir.path().join("data.txt"), "line1\nline2\nline3\n").unwrap();
+
+    let result = executor
+        .execute(
+            "file_read",
+            &json!({"path": "data.txt", "start_line": 2, "end_line": 3}),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("line2"), "got: {result}");
+}
+
+#[tokio::test]
+async fn validate_boolean_args_accepted() {
+    let (dir, executor) = setup();
+    fs::create_dir_all(dir.path().join(".hidden")).unwrap();
+    fs::write(dir.path().join(".hidden/secret.txt"), "x").unwrap();
+
+    let result = executor
+        .execute("ls", &json!({"path": ".", "all": true}))
+        .await
+        .unwrap();
+    assert!(!result.is_empty());
+}
+
+// --- Git tool tests ---
+
+#[tokio::test]
+async fn git_status_clean_repo() {
+    let (_dir, executor) = setup_git();
+    let result = executor.execute("git_status", &json!({})).await.unwrap();
+    // Branch info is present, no modified files
+    assert!(result.contains("master") || result.contains("main"));
+}
+
+#[tokio::test]
+async fn git_status_with_changes() {
+    let (dir, executor) = setup_git();
+    fs::write(dir.path().join("new.txt"), "new file").unwrap();
+
+    let result = executor.execute("git_status", &json!({})).await.unwrap();
+    assert!(result.contains("new.txt"));
+}
+
+#[tokio::test]
+async fn git_status_verbose() {
+    let (_dir, executor) = setup_git();
+    let result = executor
+        .execute("git_status", &json!({"verbose": true}))
+        .await
+        .unwrap();
+    assert!(result.contains("nothing to commit"));
+}
+
+#[tokio::test]
+async fn git_diff_no_changes() {
+    let (_dir, executor) = setup_git();
+    let result = executor.execute("git_diff", &json!({})).await.unwrap();
+    assert_eq!(result, "no differences");
+}
+
+#[tokio::test]
+async fn git_diff_unstaged_changes() {
+    let (dir, executor) = setup_git();
+    fs::write(dir.path().join("README.md"), "# Updated\n").unwrap();
+
+    let result = executor.execute("git_diff", &json!({})).await.unwrap();
+    assert!(result.contains("README.md"));
+    assert!(result.contains("Updated"));
+}
+
+#[tokio::test]
+async fn git_diff_staged() {
+    let (dir, executor) = setup_git();
+    fs::write(dir.path().join("README.md"), "# Staged\n").unwrap();
+    Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    let result = executor
+        .execute("git_diff", &json!({"staged": true}))
+        .await
+        .unwrap();
+    assert!(result.contains("Staged"));
+}
+
+#[tokio::test]
+async fn git_log_shows_commits() {
+    let (_dir, executor) = setup_git();
+    let result = executor.execute("git_log", &json!({})).await.unwrap();
+    assert!(result.contains("initial"));
+}
+
+#[tokio::test]
+async fn git_log_with_count() {
+    let (_dir, executor) = setup_git();
+    let result = executor
+        .execute("git_log", &json!({"count": 1}))
+        .await
+        .unwrap();
+    let lines: Vec<&str> = result.trim().lines().collect();
+    assert_eq!(lines.len(), 1);
+}
+
+#[tokio::test]
+async fn git_log_detailed_format() {
+    let (_dir, executor) = setup_git();
+    let result = executor
+        .execute("git_log", &json!({"oneline": false}))
+        .await
+        .unwrap();
+    assert!(result.contains("test@test.com"));
+}
+
+#[tokio::test]
+async fn git_commit_with_files() {
+    let (dir, executor) = setup_git();
+    fs::write(dir.path().join("new.txt"), "content").unwrap();
+
+    let result = executor
+        .execute(
+            "git_commit",
+            &json!({"message": "add new file", "files": ["new.txt"]}),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("add new file"));
+
+    // Verify commit is in log
+    let log = executor.execute("git_log", &json!({})).await.unwrap();
+    assert!(log.contains("add new file"));
+}
+
+#[tokio::test]
+async fn git_commit_all_flag() {
+    let (dir, executor) = setup_git();
+    fs::write(dir.path().join("README.md"), "# Changed\n").unwrap();
+
+    let result = executor
+        .execute(
+            "git_commit",
+            &json!({"message": "update readme", "all": true}),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("update readme"));
+}
+
+#[tokio::test]
+async fn git_commit_nothing_to_commit() {
+    let (_dir, executor) = setup_git();
+    let result = executor
+        .execute("git_commit", &json!({"message": "empty"}))
+        .await
+        .unwrap();
+    assert!(result.contains("nothing to commit"));
+}
+
+#[tokio::test]
+async fn git_commit_requires_message() {
+    let (_dir, executor) = setup_git();
+    let result = executor.execute("git_commit", &json!({})).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn git_tools_read_only_classification() {
+    assert!(anvil_tools::PermissionHandler::is_read_only("git_status"));
+    assert!(anvil_tools::PermissionHandler::is_read_only("git_diff"));
+    assert!(anvil_tools::PermissionHandler::is_read_only("git_log"));
+    assert!(!anvil_tools::PermissionHandler::is_read_only("git_commit"));
 }

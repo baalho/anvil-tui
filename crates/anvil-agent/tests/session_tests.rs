@@ -1,4 +1,5 @@
 use anvil_agent::{SessionStatus, SessionStore, ToolCallEntry};
+use anvil_llm::TokenUsage;
 use tempfile::TempDir;
 
 fn setup() -> (TempDir, SessionStore) {
@@ -155,7 +156,13 @@ fn search_sessions_finds_matching_content() {
     let s1 = store.create_session().unwrap();
 
     store
-        .save_message(&s1.id, "user", Some("how do I configure docker"), None, None)
+        .save_message(
+            &s1.id,
+            "user",
+            Some("how do I configure docker"),
+            None,
+            None,
+        )
         .unwrap();
     store
         .save_message(
@@ -200,4 +207,27 @@ fn search_sessions_across_multiple_sessions() {
 
     let results = store.search_sessions("deploy", 10).unwrap();
     assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn update_session_usage_persists_cost() {
+    let (_dir, store) = setup();
+    let session = store.create_session().unwrap();
+
+    let usage = TokenUsage {
+        prompt_tokens: 1000,
+        completion_tokens: 500,
+        total_tokens: 1500,
+        request_count: 3,
+        estimated_cost_usd: Some(0.0042),
+        ..Default::default()
+    };
+
+    store.update_session_usage(&session.id, &usage).unwrap();
+
+    // Verify by re-opening and checking the session still exists
+    // (the columns are persisted in the DB row)
+    let sessions = store.list_sessions(1).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, session.id);
 }

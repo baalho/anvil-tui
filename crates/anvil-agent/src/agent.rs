@@ -1,3 +1,4 @@
+use crate::routing::ModelRouter;
 use crate::session::{SessionStatus, SessionStore, ToolCallEntry};
 use crate::system_prompt::build_system_prompt;
 use crate::thinking::ThinkingFilter;
@@ -5,9 +6,11 @@ use anvil_config::Settings;
 use anvil_llm::{
     ChatMessage, ChatRequest, LlmClient, StreamEvent, TokenUsage, ToolCallAccumulator,
 };
+use anvil_mcp::McpManager;
 use anvil_tools::{all_tool_definitions, PermissionDecision, ToolExecutor};
 use anyhow::Result;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -49,6 +52,8 @@ pub enum AgentEvent {
         after_tokens: usize,
         messages_removed: usize,
     },
+    /// Real-time output from a running tool (e.g. shell command stdout).
+    ToolOutputDelta { name: String, delta: String },
     /// Turn was cancelled (e.g. by Ctrl+C). Partial content may have been emitted.
     Cancelled,
     /// Error occurred.
@@ -81,10 +86,20 @@ pub struct Agent {
     tool_call_hashes: Vec<u64>,
     active_skills: Vec<crate::skills::Skill>,
     thinking_filter: ThinkingFilter,
+    router: ModelRouter,
+    /// MCP server manager — shared via Arc so it can be accessed from commands.
+    mcp: Arc<McpManager>,
+    /// Active character persona (fun mode).
+    active_persona: Option<crate::persona::Persona>,
 }
 
 impl Agent {
-    pub fn new(settings: Settings, workspace: PathBuf, store: SessionStore) -> Result<Self> {
+    pub fn new(
+        settings: Settings,
+        workspace: PathBuf,
+        store: SessionStore,
+        mcp: Arc<McpManager>,
+    ) -> Result<Self> {
         let client = LlmClient::new(settings.provider.clone())?;
         let executor = ToolExecutor::new(
             workspace.clone(),
@@ -119,6 +134,9 @@ impl Agent {
             tool_call_hashes: Vec::new(),
             active_skills: Vec::new(),
             thinking_filter: ThinkingFilter::new(),
+            router: ModelRouter::new(),
+            mcp,
+            active_persona: None,
         })
     }
 
@@ -129,6 +147,7 @@ impl Agent {
         store: SessionStore,
         session_id: &str,
         stored_messages: Vec<crate::session::StoredMessage>,
+        mcp: Arc<McpManager>,
     ) -> Result<Self> {
         let client = LlmClient::new(settings.provider.clone())?;
         let executor = ToolExecutor::new(
@@ -195,6 +214,9 @@ impl Agent {
             tool_call_hashes: Vec::new(),
             active_skills: Vec::new(),
             thinking_filter: ThinkingFilter::new(),
+            router: ModelRouter::new(),
+            mcp,
+            active_persona: None,
         })
     }
 
@@ -252,6 +274,16 @@ impl Agent {
     /// top_p, min_p, repeat_penalty, top_k).
     pub fn apply_model_profile(&mut self, profile: &anvil_config::ModelProfile) {
         self.client.set_sampling(profile.sampling.clone());
+    }
+
+    /// Access the model router for adding/removing routes.
+    pub fn router_mut(&mut self) -> &mut ModelRouter {
+        &mut self.router
+    }
+
+    /// Access the model router (read-only).
+    pub fn router(&self) -> &ModelRouter {
+        &self.router
     }
 
     /// Clear sampling parameter overrides (revert to backend defaults).
@@ -455,12 +487,18 @@ impl Agent {
     }
 
     fn rebuild_system_prompt(&mut self) {
-        let prompt = build_system_prompt(
+        let mut prompt = build_system_prompt(
             &self._workspace,
             self._settings.agent.system_prompt_override.as_deref(),
             self.client.model(),
             &self.active_skills,
         );
+
+        // Prepend persona instructions if active
+        if let Some(persona) = &self.active_persona {
+            prompt = format!("{}\n\n---\n\n{}", persona.prompt, prompt);
+        }
+
         if let Some(first) = self.messages.first_mut() {
             if first.role == anvil_llm::Role::System {
                 first.content = Some(prompt);
@@ -468,6 +506,22 @@ impl Agent {
             }
         }
         self.messages.insert(0, ChatMessage::system(prompt));
+    }
+
+    /// Access the MCP manager for slash commands and status display.
+    pub fn mcp(&self) -> &Arc<McpManager> {
+        &self.mcp
+    }
+
+    /// Activate a character persona. Rebuilds the system prompt with persona instructions.
+    pub fn set_persona(&mut self, persona: Option<crate::persona::Persona>) {
+        self.active_persona = persona;
+        self.rebuild_system_prompt();
+    }
+
+    /// Get the active persona, if any.
+    pub fn persona(&self) -> Option<&crate::persona::Persona> {
+        self.active_persona.as_ref()
     }
 
     pub fn context_limit(&self) -> usize {
@@ -563,9 +617,7 @@ impl Agent {
                 let pct = (estimated * 100) / self.context_limit;
 
                 // Auto-compact if threshold is set and exceeded
-                if self.auto_compact_threshold > 0
-                    && pct >= self.auto_compact_threshold as usize
-                {
+                if self.auto_compact_threshold > 0 && pct >= self.auto_compact_threshold as usize {
                     let result = self.compact(4, event_tx, cancel.clone()).await?;
                     if result.messages_removed > 0 {
                         let _ = event_tx
@@ -586,7 +638,10 @@ impl Agent {
                 }
             }
 
-            let tool_defs = all_tool_definitions();
+            // Merge built-in tool definitions with MCP server tools
+            let mut tool_defs = all_tool_definitions();
+            let mcp_defs = self.mcp.tool_definitions().await;
+            tool_defs.extend(mcp_defs);
             let tools_json: Vec<anvil_llm::ToolDefinition> =
                 serde_json::from_value(serde_json::Value::Array(tool_defs))?;
 
@@ -651,6 +706,16 @@ impl Agent {
                             .record_stream_usage(u.prompt_tokens, u.completion_tokens);
                         _stream_usage = Some(u);
                     }
+                    StreamEvent::Error(msg) => {
+                        tracing::warn!("mid-stream error: {msg}");
+                        let _ = event_tx
+                            .send(AgentEvent::ContentDelta(format!(
+                                "\n\n[stream error: {msg}]\n"
+                            )))
+                            .await;
+                        was_cancelled = true;
+                        break;
+                    }
                     StreamEvent::Done => break,
                 }
             }
@@ -671,6 +736,11 @@ impl Agent {
             let _ = event_tx
                 .send(AgentEvent::Usage(self.client.usage().clone()))
                 .await;
+
+            // Persist cumulative usage so cost data survives restarts
+            let _ = self
+                .store
+                .update_session_usage(&self.session_id, self.client.usage());
 
             let tool_calls = tool_acc.finish();
 
@@ -711,9 +781,74 @@ impl Agent {
                 return Ok(());
             }
 
-            // Process tool calls sequentially
-            for tc in &tool_calls {
-                // Check cancellation between tool calls
+            // Partition tool calls: read-only built-in tools run in parallel,
+            // mutating tools and MCP tools run sequentially after.
+            // MCP tools are always sequential (external process I/O).
+            let (read_only, mutating): (Vec<_>, Vec<_>) = tool_calls.iter().partition(|tc| {
+                !McpManager::is_mcp_tool(&tc.function.name)
+                    && anvil_tools::PermissionHandler::is_read_only(&tc.function.name)
+            });
+
+            // Execute read-only tools in parallel
+            if !read_only.is_empty() && !cancel.is_cancelled() {
+                let mut handles = Vec::new();
+                for tc in &read_only {
+                    self.record_tool_call_hash(&tc.function.name, &tc.function.arguments);
+                    let args: serde_json::Value =
+                        serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                    let name = tc.function.name.clone();
+                    let executor = self.executor.clone();
+                    handles.push(tokio::spawn(async move {
+                        let start = std::time::Instant::now();
+                        let result = executor
+                            .execute(&name, &args)
+                            .await
+                            .unwrap_or_else(|e| format!("error: {e}"));
+                        let duration = start.elapsed();
+                        (result, duration)
+                    }));
+                }
+
+                // Collect results in original order
+                for (tc, handle) in read_only.iter().zip(handles) {
+                    let (result, duration) = handle.await.unwrap_or_else(|e| {
+                        (
+                            format!("error: task panicked: {e}"),
+                            std::time::Duration::ZERO,
+                        )
+                    });
+
+                    self.store.save_tool_call(&ToolCallEntry {
+                        session_id: &self.session_id,
+                        message_id: &msg_id,
+                        tool_name: &tc.function.name,
+                        arguments: &tc.function.arguments,
+                        result: Some(&result),
+                        duration_ms: Some(duration.as_millis() as i64),
+                        permission: "allowed",
+                    })?;
+
+                    let _ = event_tx
+                        .send(AgentEvent::ToolResult {
+                            name: tc.function.name.clone(),
+                            result: result.clone(),
+                        })
+                        .await;
+
+                    let tool_result_msg = ChatMessage::tool_result(&tc.id, &result);
+                    self.messages.push(tool_result_msg);
+                    self.store.save_message(
+                        &self.session_id,
+                        "tool",
+                        Some(&result),
+                        None,
+                        Some(&tc.id),
+                    )?;
+                }
+            }
+
+            // Execute mutating/MCP tools sequentially
+            for tc in &mutating {
                 if cancel.is_cancelled() {
                     let _ = event_tx.send(AgentEvent::Cancelled).await;
                     return Ok(());
@@ -735,12 +870,12 @@ impl Agent {
                 }
                 self.record_tool_call_hash(&tc.function.name, &tc.function.arguments);
 
-                let is_read_only = anvil_tools::PermissionHandler::is_read_only(&tc.function.name);
-                let needs_permission = !is_read_only
-                    && !self
-                        .executor
-                        .permissions()
-                        .is_always_allowed(&tc.function.name);
+                let is_mcp = McpManager::is_mcp_tool(&tc.function.name);
+
+                let needs_permission = !self
+                    .executor
+                    .permissions()
+                    .is_always_allowed(&tc.function.name);
 
                 let decision = if needs_permission {
                     let _ = event_tx
@@ -772,11 +907,20 @@ impl Agent {
                         };
 
                         let start = std::time::Instant::now();
-                        let result = self
-                            .executor
-                            .execute(&tc.function.name, &args)
-                            .await
-                            .unwrap_or_else(|e| format!("error: {e}"));
+
+                        // Dispatch to MCP or built-in executor
+                        let result = if is_mcp {
+                            self.mcp
+                                .call_tool(&tc.function.name, &args)
+                                .await
+                                .unwrap_or_else(|e| format!("error: {e}"))
+                        } else {
+                            self.executor
+                                .execute(&tc.function.name, &args)
+                                .await
+                                .unwrap_or_else(|e| format!("error: {e}"))
+                        };
+
                         let duration = start.elapsed();
 
                         self.store.save_tool_call(&ToolCallEntry {
@@ -813,7 +957,6 @@ impl Agent {
                     }
                 };
 
-                // Add tool result to conversation
                 let tool_result_msg = ChatMessage::tool_result(&tc.id, &result);
                 self.messages.push(tool_result_msg);
                 self.store.save_message(

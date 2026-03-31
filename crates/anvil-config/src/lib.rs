@@ -19,6 +19,7 @@
 //! ```
 
 mod bundled_skills;
+pub mod migration;
 mod profiles;
 mod provider;
 mod settings;

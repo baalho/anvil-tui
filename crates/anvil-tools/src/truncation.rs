@@ -4,6 +4,7 @@ use std::path::PathBuf;
 const DEFAULT_MAX_LINES: usize = 200;
 const DEFAULT_MAX_BYTES: usize = 30_000;
 
+#[derive(Clone)]
 pub struct TruncationConfig {
     pub max_lines: usize,
     pub max_bytes: usize,

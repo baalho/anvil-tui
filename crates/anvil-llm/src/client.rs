@@ -241,6 +241,7 @@ impl LlmClient {
         tokio::spawn(async move {
             if let Err(e) = process_sse_stream(resp, &tx, cancel).await {
                 tracing::error!("SSE stream error: {e}");
+                let _ = tx.send(StreamEvent::Error(e.to_string())).await;
             }
             let _ = tx.send(StreamEvent::Done).await;
         });

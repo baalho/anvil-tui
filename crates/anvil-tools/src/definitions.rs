@@ -169,5 +169,98 @@ pub fn all_tool_definitions() -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "git_status",
+                "description": "Show the working tree status. Returns modified, staged, and untracked files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "verbose": {
+                            "type": "boolean",
+                            "description": "Show full status instead of short format (default: false)"
+                        }
+                    },
+                    "required": []
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "git_diff",
+                "description": "Show changes between commits, staging area, and working tree.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "staged": {
+                            "type": "boolean",
+                            "description": "Show staged (cached) changes instead of unstaged (default: false)"
+                        },
+                        "ref": {
+                            "type": "string",
+                            "description": "Git ref to diff against (e.g. HEAD~1, main, a commit SHA)"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Limit diff to a specific file or directory"
+                        }
+                    },
+                    "required": []
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "git_log",
+                "description": "Show recent commit history.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "count": {
+                            "type": "integer",
+                            "description": "Number of commits to show (default: 10)"
+                        },
+                        "oneline": {
+                            "type": "boolean",
+                            "description": "One-line format (default: true)"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Show commits affecting this file or directory"
+                        }
+                    },
+                    "required": []
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "git_commit",
+                "description": "Stage files and create a git commit.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                            "description": "Commit message"
+                        },
+                        "files": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Files to stage before committing. If empty and all=true, stages all modified files."
+                        },
+                        "all": {
+                            "type": "boolean",
+                            "description": "Stage all modified tracked files (-a flag, default: false)"
+                        }
+                    },
+                    "required": ["message"]
+                }
+            }
+        }),
     ]
 }

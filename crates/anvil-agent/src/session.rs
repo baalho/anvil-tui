@@ -108,6 +108,23 @@ impl SessionStore {
             ",
         )?;
 
+        // Add token usage and cost columns to sessions (idempotent).
+        // These track cumulative usage per session for cost reporting.
+        let has_tokens_col: bool = self
+            .conn
+            .prepare("SELECT prompt_tokens FROM sessions LIMIT 0")
+            .is_ok();
+        if !has_tokens_col {
+            self.conn.execute_batch(
+                "
+                ALTER TABLE sessions ADD COLUMN prompt_tokens INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE sessions ADD COLUMN completion_tokens INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE sessions ADD COLUMN total_tokens INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE sessions ADD COLUMN estimated_cost_usd REAL;
+                ",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -252,6 +269,29 @@ impl SessionStore {
         self.conn.execute(
             "UPDATE sessions SET status = ?1, updated_at = ?2 WHERE id = ?3",
             params![status.to_string(), now, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Persist cumulative token usage and cost for a session.
+    /// Called after each agent turn so cost data survives restarts.
+    pub fn update_session_usage(
+        &self,
+        session_id: &str,
+        usage: &anvil_llm::TokenUsage,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE sessions SET prompt_tokens = ?1, completion_tokens = ?2, \
+             total_tokens = ?3, estimated_cost_usd = ?4, updated_at = ?5 WHERE id = ?6",
+            params![
+                usage.prompt_tokens as i64,
+                usage.completion_tokens as i64,
+                usage.total_tokens as i64,
+                usage.estimated_cost_usd,
+                now,
+                session_id,
+            ],
         )?;
         Ok(())
     }

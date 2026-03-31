@@ -17,11 +17,15 @@
 
 mod definitions;
 mod executor;
+pub mod hooks;
 mod permission;
+pub mod plugins;
 mod tools;
 mod truncation;
 
 pub use definitions::all_tool_definitions;
 pub use executor::ToolExecutor;
+pub use hooks::HookRunner;
 pub use permission::{PermissionDecision, PermissionHandler};
+pub use plugins::{load_plugins, ToolPlugin};
 pub use truncation::{TruncationConfig, TruncationResult};

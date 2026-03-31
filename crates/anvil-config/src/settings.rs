@@ -23,6 +23,32 @@ pub struct Settings {
     /// Tool execution settings (timeouts, output limits).
     #[serde(default)]
     pub tools: ToolSettings,
+    /// MCP (Model Context Protocol) server configuration.
+    #[serde(default)]
+    pub mcp: McpSettings,
+}
+
+/// MCP server configuration — connects to external tool servers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpSettings {
+    /// List of MCP servers to connect to at startup.
+    #[serde(default)]
+    pub servers: Vec<McpServerEntry>,
+}
+
+/// A single MCP server entry in config.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerEntry {
+    /// Display name for the server.
+    pub name: String,
+    /// Command to spawn the server process.
+    pub command: String,
+    /// Arguments to pass to the command.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment variables for the server process.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
 }
 
 /// Controls agent loop behavior — context management, safety limits, and prompt overrides.

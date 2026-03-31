@@ -11,7 +11,7 @@
 //! partial tags and only emits content once it knows whether it's thinking or not.
 //!
 //! # Edge cases handled
-//! - `<think>` split across chunks: `<thi` + `nk>` 
+//! - `<think>` split across chunks: `<thi` + `nk>`
 //! - `</think>` split across chunks: `</thi` + `nk>`
 //! - Multiple `<think>` blocks in one response
 //! - Malformed/unclosed tags (treated as regular content after timeout)

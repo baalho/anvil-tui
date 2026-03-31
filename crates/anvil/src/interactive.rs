@@ -184,9 +184,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                                     execute!(
                                         io::stdout(),
                                         SetForegroundColor(Color::Green),
-                                        Print(format!(
-                                            "backend started: llama-server at {url}\n"
-                                        )),
+                                        Print(format!("backend started: llama-server at {url}\n")),
                                         ResetColor,
                                     )?;
                                     managed_backend = Some(bp);
@@ -414,6 +412,15 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         Print(format!(
                             "  [context: ~{estimated_tokens}/{limit} tokens ({pct}%)]\n"
                         )),
+                        ResetColor,
+                    )?;
+                }
+                AgentEvent::ToolOutputDelta { delta, .. } => {
+                    // Stream tool output to terminal in real-time
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::DarkGrey),
+                        Print(&delta),
                         ResetColor,
                     )?;
                 }

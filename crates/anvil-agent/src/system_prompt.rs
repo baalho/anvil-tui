@@ -158,6 +158,7 @@ mod tests {
             tags: Vec::new(),
             required_env: Vec::new(),
             verify_command: None,
+            depends: Vec::new(),
         }];
 
         let prompt = build_system_prompt(dir.path(), None, "m", &skills);

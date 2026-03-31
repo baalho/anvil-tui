@@ -3,7 +3,7 @@ use anvil_tools::all_tool_definitions;
 #[test]
 fn all_tools_have_required_fields() {
     let defs = all_tool_definitions();
-    assert_eq!(defs.len(), 7, "should have exactly 7 tools");
+    assert_eq!(defs.len(), 11, "should have exactly 11 tools");
 
     let expected_names = [
         "file_read",
@@ -13,6 +13,10 @@ fn all_tools_have_required_fields() {
         "grep",
         "ls",
         "find",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_commit",
     ];
 
     for (def, expected_name) in defs.iter().zip(expected_names.iter()) {

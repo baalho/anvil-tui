@@ -2,12 +2,13 @@ mod backend;
 mod commands;
 mod interactive;
 
-use anvil_agent::{Agent, AgentEvent, SessionStore};
-use anvil_config::{data_dir, load_settings};
+use anvil_agent::{Agent, AgentEvent, McpManager, McpServerConfig, SessionStore};
+use anvil_config::{data_dir, load_settings, Settings};
 use anvil_tools::PermissionDecision;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -41,6 +42,11 @@ enum Commands {
         /// Search session content
         #[arg(short, long)]
         search: Option<String>,
+    },
+    /// Show detailed documentation on a topic (tools, skills, config, commands)
+    Docs {
+        /// Topic to show docs for
+        topic: String,
     },
     /// Run a single prompt non-interactively
     Run {
@@ -84,6 +90,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Init) => cmd_init(&workspace),
+        Some(Commands::Docs { topic }) => cmd_help(&topic),
         Some(Commands::History { limit, search }) => cmd_history(limit, search),
         Some(Commands::Run {
             prompt,
@@ -127,9 +134,11 @@ async fn main() -> Result<()> {
             let db_path = data_dir()?.join("sessions.db");
             let store = SessionStore::open(&db_path)?;
 
+            let mcp = build_mcp_manager(&settings).await;
+
             let (mut agent, summary) = match cli.continue_session {
-                Some(prefix) => resume_session(&workspace, &store, prefix.as_deref())?,
-                None => (Agent::new(settings, workspace, store)?, None),
+                Some(prefix) => resume_session(&workspace, &store, prefix.as_deref(), mcp)?,
+                None => (Agent::new(settings, workspace, store, mcp)?, None),
             };
 
             // Apply sampling params from profile to the LLM client
@@ -140,6 +149,22 @@ async fn main() -> Result<()> {
             interactive::run_interactive(agent, summary).await
         }
     }
+}
+
+fn cmd_help(topic: &str) -> Result<()> {
+    let text = match topic {
+        "tools" => include_str!("help/tools.md"),
+        "skills" => include_str!("help/skills.md"),
+        "config" => include_str!("help/config.md"),
+        "commands" => include_str!("help/commands.md"),
+        _ => {
+            println!("Available topics: tools, skills, config, commands");
+            println!("\nUsage: anvil help <topic>");
+            return Ok(());
+        }
+    };
+    println!("{text}");
+    Ok(())
 }
 
 fn cmd_init(workspace: &Path) -> Result<()> {
@@ -168,7 +193,11 @@ fn cmd_history(limit: usize, search: Option<String>) -> Result<()> {
             } else {
                 &r.session_id
             };
-            println!("{sid} [{role}] {snippet}", role = r.role, snippet = r.snippet);
+            println!(
+                "{sid} [{role}] {snippet}",
+                role = r.role,
+                snippet = r.snippet
+            );
         }
         return Ok(());
     }
@@ -195,6 +224,28 @@ fn load_model_profiles(workspace: &Path) -> Vec<anvil_config::ModelProfile> {
         .unwrap_or_default()
 }
 
+/// Build an MCP manager from settings. Connects to all configured servers.
+/// Returns an empty manager if no servers are configured.
+async fn build_mcp_manager(settings: &Settings) -> Arc<McpManager> {
+    if settings.mcp.servers.is_empty() {
+        return Arc::new(McpManager::empty());
+    }
+
+    let configs: Vec<McpServerConfig> = settings
+        .mcp
+        .servers
+        .iter()
+        .map(|entry| McpServerConfig {
+            name: entry.name.clone(),
+            command: entry.command.clone(),
+            args: entry.args.clone(),
+            env: entry.env.clone(),
+        })
+        .collect();
+
+    Arc::new(McpManager::new(&configs).await)
+}
+
 async fn cmd_run(
     workspace: &Path,
     prompt: &str,
@@ -214,7 +265,8 @@ async fn cmd_run(
 
     let db_path = data_dir()?.join("sessions.db");
     let store = SessionStore::open(&db_path)?;
-    let mut agent = Agent::new(settings, workspace.to_path_buf(), store)?;
+    let mcp = build_mcp_manager(&settings).await;
+    let mut agent = Agent::new(settings, workspace.to_path_buf(), store, mcp)?;
 
     // Apply sampling from profile
     if let Some(profile) = anvil_config::find_matching_profile(&profiles, agent.model()) {
@@ -336,6 +388,11 @@ async fn cmd_run(
                     );
                 }
             }
+            AgentEvent::ToolOutputDelta { delta, .. } => {
+                if !json_output {
+                    eprint!("{delta}");
+                }
+            }
             AgentEvent::Cancelled => {
                 if !json_output {
                     eprintln!("\n[cancelled]");
@@ -396,7 +453,8 @@ async fn cmd_run_autonomous(
 
     let db_path = data_dir()?.join("sessions.db");
     let store = SessionStore::open(&db_path)?;
-    let mut agent = Agent::new(settings, workspace.to_path_buf(), store)?;
+    let mcp = build_mcp_manager(&settings).await;
+    let mut agent = Agent::new(settings, workspace.to_path_buf(), store, mcp)?;
 
     if let Some(profile) = anvil_config::find_matching_profile(&profiles, agent.model()) {
         agent.apply_model_profile(profile);
@@ -630,6 +688,7 @@ fn resume_session(
     workspace: &Path,
     store: &SessionStore,
     prefix: Option<&str>,
+    mcp: Arc<McpManager>,
 ) -> Result<(Agent, Option<String>)> {
     let session = match prefix {
         Some(p) if !p.is_empty() => store
@@ -656,6 +715,7 @@ fn resume_session(
         store.clone(),
         &session.id,
         messages,
+        mcp,
     )?;
 
     Ok((agent, Some(summary)))

@@ -183,26 +183,56 @@ pub async fn shell(
     }
 
     let child = cmd.spawn()?;
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(per_call_timeout),
-        child.wait_with_output(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("command timed out after {per_call_timeout}s"))??;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let exit_code = output.status.code().unwrap_or(-1);
+    // Capture the PID before wait_with_output() takes ownership
+    #[cfg(unix)]
+    let child_pid = child.id();
 
-    let mut result = format!("exit code: {exit_code}\n");
-    if !stdout.is_empty() {
-        result.push_str(&format!("stdout:\n{stdout}"));
+    let timeout_duration = std::time::Duration::from_secs(per_call_timeout);
+    match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let exit_code = output.status.code().unwrap_or(-1);
+
+            let mut result = format!("exit code: {exit_code}\n");
+            if !stdout.is_empty() {
+                result.push_str(&format!("stdout:\n{stdout}"));
+            }
+            if !stderr.is_empty() {
+                result.push_str(&format!("stderr:\n{stderr}"));
+            }
+            Ok(result)
+        }
+        Ok(Err(e)) => bail!("command failed: {e}"),
+        Err(_) => {
+            // Timeout: try SIGTERM first, then SIGKILL after 5s.
+            // Note: wait_with_output() consumed `child`, so we use the
+            // saved PID to send signals directly.
+            let result = format!("error: command timed out after {per_call_timeout}s (killed)\n");
+
+            #[cfg(unix)]
+            if let Some(pid) = child_pid {
+                // Send SIGTERM to the process group
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
+                // Give it 5s to exit, then SIGKILL
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+            }
+
+            #[cfg(not(unix))]
+            {
+                // On non-Unix, the dropped child handle will terminate the process
+                let _ = per_call_timeout; // suppress unused warning
+            }
+
+            Ok(result)
+        }
     }
-    if !stderr.is_empty() {
-        result.push_str(&format!("stderr:\n{stderr}"));
-    }
-
-    Ok(result)
 }
 
 pub async fn grep(workspace: &Path, args: &Value) -> Result<String> {
@@ -433,4 +463,163 @@ async fn find_recursive(
         }
     }
     Ok(())
+}
+
+// --- Git tools ---
+// Purpose-built git operations that avoid the shell tool's env_clear() restrictions
+// and provide structured output.
+
+/// Run `git status` in the workspace. Returns short-format status.
+pub async fn git_status(workspace: &Path, args: &Value) -> Result<String> {
+    let verbose = args["verbose"].as_bool().unwrap_or(false);
+
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.current_dir(workspace);
+
+    if verbose {
+        cmd.args(["status"]);
+    } else {
+        cmd.args(["status", "--short", "--branch"]);
+    }
+
+    let output = cmd.output().await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+        bail!("git status failed: {stderr}");
+    }
+
+    if stdout.trim().is_empty() {
+        Ok("working tree clean".to_string())
+    } else {
+        Ok(stdout.to_string())
+    }
+}
+
+/// Run `git diff` in the workspace. Supports staged, unstaged, and ref comparisons.
+pub async fn git_diff(workspace: &Path, args: &Value) -> Result<String> {
+    let staged = args["staged"].as_bool().unwrap_or(false);
+    let path = args["path"].as_str();
+    let ref_spec = args["ref"].as_str();
+
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.current_dir(workspace).arg("diff");
+
+    if staged {
+        cmd.arg("--cached");
+    }
+
+    if let Some(r) = ref_spec {
+        cmd.arg(r);
+    }
+
+    cmd.arg("--stat").arg("--patch");
+
+    if let Some(p) = path {
+        cmd.arg("--").arg(p);
+    }
+
+    let output = cmd.output().await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+        bail!("git diff failed: {stderr}");
+    }
+
+    if stdout.trim().is_empty() {
+        Ok("no differences".to_string())
+    } else {
+        Ok(stdout.to_string())
+    }
+}
+
+/// Run `git log` in the workspace. Returns recent commits.
+pub async fn git_log(workspace: &Path, args: &Value) -> Result<String> {
+    let count = args["count"].as_u64().unwrap_or(10);
+    let oneline = args["oneline"].as_bool().unwrap_or(true);
+    let path = args["path"].as_str();
+
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.current_dir(workspace).arg("log");
+
+    cmd.arg(format!("-{count}"));
+
+    if oneline {
+        cmd.arg("--oneline");
+    } else {
+        cmd.arg("--format=%H %an <%ae> %ai%n  %s");
+    }
+
+    if let Some(p) = path {
+        cmd.arg("--").arg(p);
+    }
+
+    let output = cmd.output().await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+        bail!("git log failed: {stderr}");
+    }
+
+    if stdout.trim().is_empty() {
+        Ok("no commits".to_string())
+    } else {
+        Ok(stdout.to_string())
+    }
+}
+
+/// Run `git commit` in the workspace. Stages specified files and commits.
+///
+/// This is a mutating operation — requires user permission.
+pub async fn git_commit(workspace: &Path, args: &Value) -> Result<String> {
+    let message = args["message"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("commit message is required"))?;
+
+    let files = args["files"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    let all = args["all"].as_bool().unwrap_or(false);
+
+    // Stage files
+    if !files.is_empty() {
+        let mut add_cmd = tokio::process::Command::new("git");
+        add_cmd.current_dir(workspace).arg("add");
+        for f in &files {
+            add_cmd.arg(f);
+        }
+        let add_output = add_cmd.output().await?;
+        if !add_output.status.success() {
+            let stderr = String::from_utf8_lossy(&add_output.stderr);
+            bail!("git add failed: {stderr}");
+        }
+    }
+
+    // Commit
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.current_dir(workspace).arg("commit");
+
+    if all && files.is_empty() {
+        cmd.arg("-a");
+    }
+
+    cmd.arg("-m").arg(message);
+
+    let output = cmd.output().await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+        if stdout.contains("nothing to commit") || stderr.contains("nothing to commit") {
+            return Ok("nothing to commit, working tree clean".to_string());
+        }
+        bail!("git commit failed: {stderr}");
+    }
+
+    Ok(stdout.to_string())
 }

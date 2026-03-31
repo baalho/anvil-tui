@@ -60,13 +60,14 @@ impl BackendProcess {
         // Redirect stdout/stderr to avoid cluttering the terminal
         cmd.stdout(Stdio::null()).stderr(Stdio::piped());
 
-        let child = cmd.spawn().map_err(|e| {
-            anyhow::anyhow!(
-                "failed to start llama-server (is it installed?): {e}"
-            )
-        })?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("failed to start llama-server (is it installed?): {e}"))?;
 
-        eprintln!("backend: started llama-server (pid {}) on port {port}", child.id());
+        eprintln!(
+            "backend: started llama-server (pid {}) on port {port}",
+            child.id()
+        );
 
         let mut process = Self {
             child: Some(child),

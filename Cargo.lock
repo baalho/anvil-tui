@@ -97,6 +97,7 @@ version = "0.1.0"
 dependencies = [
  "anvil-config",
  "anvil-llm",
+ "anvil-mcp",
  "anvil-tools",
  "anyhow",
  "chrono",
@@ -146,16 +147,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "anvil-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "anvil-tools"
 version = "0.1.0"
 dependencies = [
  "anvil-config",
  "anyhow",
+ "libc",
  "regex",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "uuid",
 ]

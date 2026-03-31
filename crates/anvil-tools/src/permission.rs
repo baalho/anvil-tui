@@ -49,8 +49,14 @@ impl PermissionHandler {
     }
 
     /// Check if a tool is read-only (doesn't need permission).
+    ///
+    /// Read-only tools are safe to execute without user approval and can
+    /// run in parallel when the LLM requests multiple tool calls.
     pub fn is_read_only(tool_name: &str) -> bool {
-        matches!(tool_name, "file_read" | "grep")
+        matches!(
+            tool_name,
+            "file_read" | "grep" | "ls" | "find" | "git_status" | "git_diff" | "git_log"
+        )
     }
 }
 

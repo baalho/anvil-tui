@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 anvil-config = { workspace = true }
 anvil-llm = { workspace = true }
+anvil-mcp = { workspace = true }
 anvil-tools = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
