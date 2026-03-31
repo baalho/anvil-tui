@@ -1,4 +1,4 @@
-use anvil_agent::{Agent, SkillLoader};
+use anvil_agent::{Agent, MemoryStore, SkillLoader};
 use anvil_llm::TokenUsage;
 
 pub enum CommandResult {
@@ -53,6 +53,7 @@ pub async fn handle_command(
         "/ralph" => ralph_command(arg),
         "/clear" => CommandResult::Compact,
         "/think" => CommandResult::Handled(think_command(agent)),
+        "/memory" => CommandResult::Handled(memory_command(agent, arg)),
         "/skill" => CommandResult::Handled(skill_command(agent, arg)),
         _ => CommandResult::Unknown(cmd.to_string()),
     }
@@ -74,9 +75,47 @@ fn help_text() -> String {
         "  /ralph <prompt> --verify <cmd> Run autonomous mode (Ralph Loop)",
         "  /clear                       Compact conversation context",
         "  /think                       Toggle <think> block visibility",
+        "  /memory                      List stored patterns",
+        "  /memory add <pattern>        Save a new pattern",
+        "  /memory clear                Remove all patterns",
         "  /end                         End session and exit",
     ]
     .join("\n")
+}
+
+fn memory_command(agent: &Agent, arg: &str) -> String {
+    let memory_dir = agent.workspace().join(".anvil/memory");
+    let store = MemoryStore::new(memory_dir);
+
+    if arg.is_empty() {
+        let entries = store.load_all();
+        if entries.is_empty() {
+            return "no stored patterns. use /memory add <pattern> to save one".to_string();
+        }
+        let mut output = format!("{} stored pattern(s):\n", entries.len());
+        for entry in &entries {
+            output.push_str(&format!("\n  [{}]\n  {}\n", entry.filename, entry.content));
+        }
+        return output;
+    }
+
+    if let Some(pattern) = arg.strip_prefix("add ") {
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            return "usage: /memory add <pattern>".to_string();
+        }
+        match store.add(pattern) {
+            Ok(filename) => format!("saved: {filename}"),
+            Err(e) => format!("failed to save: {e}"),
+        }
+    } else if arg == "clear" {
+        match store.clear() {
+            Ok(count) => format!("removed {count} pattern(s)"),
+            Err(e) => format!("failed to clear: {e}"),
+        }
+    } else {
+        "usage: /memory, /memory add <pattern>, /memory clear".to_string()
+    }
 }
 
 fn think_command(agent: &mut Agent) -> String {

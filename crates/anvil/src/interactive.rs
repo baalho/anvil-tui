@@ -354,6 +354,20 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                     }
                     println!();
                 }
+                AgentEvent::AutoCompacted {
+                    before_tokens,
+                    after_tokens,
+                    messages_removed,
+                } => {
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::DarkYellow),
+                        Print(format!(
+                            "  [auto-compacted: {messages_removed} messages, ~{before_tokens} → ~{after_tokens} tokens]\n"
+                        )),
+                        ResetColor,
+                    )?;
+                }
                 AgentEvent::Cancelled => {
                     if needs_newline {
                         println!();

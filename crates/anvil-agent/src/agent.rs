@@ -43,6 +43,12 @@ pub enum AgentEvent {
         estimated_tokens: usize,
         limit: usize,
     },
+    /// Context was auto-compacted because it exceeded the threshold.
+    AutoCompacted {
+        before_tokens: usize,
+        after_tokens: usize,
+        messages_removed: usize,
+    },
     /// Turn was cancelled (e.g. by Ctrl+C). Partial content may have been emitted.
     Cancelled,
     /// Error occurred.
@@ -70,6 +76,8 @@ pub struct Agent {
     messages: Vec<ChatMessage>,
     context_limit: usize,
     loop_detection_limit: usize,
+    /// Auto-compact when context usage exceeds this percentage (0 = disabled).
+    auto_compact_threshold: u8,
     tool_call_hashes: Vec<u64>,
     active_skills: Vec<crate::skills::Skill>,
     thinking_filter: ThinkingFilter,
@@ -95,6 +103,7 @@ impl Agent {
 
         let context_limit = settings.agent.context_window;
         let loop_detection_limit = settings.agent.loop_detection_limit as usize;
+        let auto_compact_threshold = settings.agent.auto_compact_threshold;
 
         Ok(Self {
             client,
@@ -106,6 +115,7 @@ impl Agent {
             messages,
             context_limit,
             loop_detection_limit,
+            auto_compact_threshold,
             tool_call_hashes: Vec::new(),
             active_skills: Vec::new(),
             thinking_filter: ThinkingFilter::new(),
@@ -169,6 +179,7 @@ impl Agent {
 
         let context_limit = settings.agent.context_window;
         let loop_detection_limit = settings.agent.loop_detection_limit as usize;
+        let auto_compact_threshold = settings.agent.auto_compact_threshold;
 
         Ok(Self {
             client,
@@ -180,6 +191,7 @@ impl Agent {
             messages,
             context_limit,
             loop_detection_limit,
+            auto_compact_threshold,
             tool_call_hashes: Vec::new(),
             active_skills: Vec::new(),
             thinking_filter: ThinkingFilter::new(),
@@ -545,11 +557,26 @@ impl Agent {
                 return Ok(());
             }
 
-            // Context window check
+            // Context window check and auto-compaction
             if self.context_limit > 0 {
                 let estimated = self.estimate_context_tokens();
                 let pct = (estimated * 100) / self.context_limit;
-                if pct >= 80 {
+
+                // Auto-compact if threshold is set and exceeded
+                if self.auto_compact_threshold > 0
+                    && pct >= self.auto_compact_threshold as usize
+                {
+                    let result = self.compact(4, event_tx, cancel.clone()).await?;
+                    if result.messages_removed > 0 {
+                        let _ = event_tx
+                            .send(AgentEvent::AutoCompacted {
+                                before_tokens: result.before_tokens,
+                                after_tokens: result.after_tokens,
+                                messages_removed: result.messages_removed,
+                            })
+                            .await;
+                    }
+                } else if pct >= 80 {
                     let _ = event_tx
                         .send(AgentEvent::ContextWarning {
                             estimated_tokens: estimated,

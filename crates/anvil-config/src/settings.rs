@@ -41,6 +41,10 @@ pub struct AgentSettings {
     /// Model context window size in tokens. Overridden by model profile if one matches.
     #[serde(default = "default_context_window")]
     pub context_window: usize,
+    /// Auto-compact when context usage exceeds this percentage (0-100).
+    /// Set to 0 to disable auto-compaction.
+    #[serde(default = "default_auto_compact_threshold")]
+    pub auto_compact_threshold: u8,
     /// Replace the entire system prompt. Use `.anvil/context.md` for additions instead.
     #[serde(default)]
     pub system_prompt_override: Option<String>,
@@ -68,6 +72,7 @@ impl Default for AgentSettings {
             warn_threshold_pct: default_warn_threshold(),
             loop_detection_limit: default_loop_limit(),
             context_window: default_context_window(),
+            auto_compact_threshold: default_auto_compact_threshold(),
             system_prompt_override: None,
         }
     }
@@ -103,4 +108,7 @@ fn default_file_timeout() -> u64 {
 }
 fn default_output_limit() -> usize {
     10_000
+}
+fn default_auto_compact_threshold() -> u8 {
+    90
 }

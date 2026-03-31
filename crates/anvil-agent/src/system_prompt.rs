@@ -1,3 +1,4 @@
+use crate::memory::MemoryStore;
 use crate::skills::Skill;
 use std::path::Path;
 
@@ -77,6 +78,14 @@ pub fn build_system_prompt(
                 prompt.push('\n');
             }
         }
+    }
+
+    // Project memory
+    let memory_dir = workspace.join(".anvil/memory");
+    let memory_store = MemoryStore::new(memory_dir);
+    if let Some(memory_section) = memory_store.as_prompt_section() {
+        prompt.push('\n');
+        prompt.push_str(&memory_section);
     }
 
     // Active skills

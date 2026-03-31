@@ -148,3 +148,56 @@ fn session_status_transitions() {
     let sessions = store.list_sessions(1).unwrap();
     assert_eq!(sessions[0].status, SessionStatus::Completed);
 }
+
+#[test]
+fn search_sessions_finds_matching_content() {
+    let (_dir, store) = setup();
+    let s1 = store.create_session().unwrap();
+
+    store
+        .save_message(&s1.id, "user", Some("how do I configure docker"), None, None)
+        .unwrap();
+    store
+        .save_message(
+            &s1.id,
+            "assistant",
+            Some("You can use a Dockerfile"),
+            None,
+            None,
+        )
+        .unwrap();
+
+    let results = store.search_sessions("docker", 10).unwrap();
+    assert!(!results.is_empty());
+    assert_eq!(results[0].session_id, s1.id);
+}
+
+#[test]
+fn search_sessions_no_results() {
+    let (_dir, store) = setup();
+    let s1 = store.create_session().unwrap();
+
+    store
+        .save_message(&s1.id, "user", Some("hello world"), None, None)
+        .unwrap();
+
+    let results = store.search_sessions("kubernetes", 10).unwrap();
+    assert!(results.is_empty());
+}
+
+#[test]
+fn search_sessions_across_multiple_sessions() {
+    let (_dir, store) = setup();
+    let s1 = store.create_session().unwrap();
+    let s2 = store.create_session().unwrap();
+
+    store
+        .save_message(&s1.id, "user", Some("deploy to production"), None, None)
+        .unwrap();
+    store
+        .save_message(&s2.id, "user", Some("deploy to staging"), None, None)
+        .unwrap();
+
+    let results = store.search_sessions("deploy", 10).unwrap();
+    assert_eq!(results.len(), 2);
+}

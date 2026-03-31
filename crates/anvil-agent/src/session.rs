@@ -96,6 +96,18 @@ impl SessionStore {
             CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
             ",
         )?;
+
+        // FTS5 virtual table for full-text search across message content.
+        self.conn.execute_batch(
+            "
+            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                session_id,
+                role,
+                content
+            );
+            ",
+        )?;
+
         Ok(())
     }
 
@@ -138,6 +150,16 @@ impl SessionStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![id, session_id, role, content, tool_calls_json, tool_call_id, now],
         )?;
+
+        // Index content for full-text search
+        if let Some(text) = content {
+            if !text.is_empty() {
+                let _ = self.conn.execute(
+                    "INSERT INTO messages_fts (session_id, role, content) VALUES (?1, ?2, ?3)",
+                    params![session_id, role, text],
+                );
+            }
+        }
 
         // Update session timestamp
         self.conn.execute(
@@ -302,6 +324,46 @@ impl SessionStore {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(sessions.pop())
+    }
+}
+
+/// A search result from full-text search across sessions.
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    pub session_id: String,
+    pub role: String,
+    pub snippet: String,
+    pub session_date: String,
+}
+
+impl SessionStore {
+    /// Search session content using FTS5 full-text search.
+    ///
+    /// Returns matching snippets with session context. The query supports
+    /// FTS5 syntax: quoted phrases, AND/OR/NOT operators, prefix matching.
+    pub fn search_sessions(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.session_id, f.role, snippet(messages_fts, 2, '»', '«', '...', 32),
+                    s.created_at
+             FROM messages_fts f
+             JOIN sessions s ON s.id = f.session_id
+             WHERE messages_fts MATCH ?1
+             ORDER BY rank
+             LIMIT ?2",
+        )?;
+
+        let results = stmt
+            .query_map(params![query, limit], |row| {
+                Ok(SearchResult {
+                    session_id: row.get(0)?,
+                    role: row.get(1)?,
+                    snippet: row.get(2)?,
+                    session_date: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(results)
     }
 }
 

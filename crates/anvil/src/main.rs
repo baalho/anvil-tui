@@ -38,6 +38,9 @@ enum Commands {
     History {
         #[arg(short, long, default_value = "20")]
         limit: usize,
+        /// Search session content
+        #[arg(short, long)]
+        search: Option<String>,
     },
     /// Run a single prompt non-interactively
     Run {
@@ -81,7 +84,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Init) => cmd_init(&workspace),
-        Some(Commands::History { limit }) => cmd_history(limit),
+        Some(Commands::History { limit, search }) => cmd_history(limit, search),
         Some(Commands::Run {
             prompt,
             auto_approve,
@@ -145,13 +148,31 @@ fn cmd_init(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_history(limit: usize) -> Result<()> {
+fn cmd_history(limit: usize, search: Option<String>) -> Result<()> {
     let db_path = data_dir()?.join("sessions.db");
     if !db_path.exists() {
         println!("no sessions found");
         return Ok(());
     }
     let store = SessionStore::open(&db_path)?;
+
+    if let Some(query) = search {
+        let results = store.search_sessions(&query, limit)?;
+        if results.is_empty() {
+            println!("no results for '{query}'");
+            return Ok(());
+        }
+        for r in &results {
+            let sid = if r.session_id.len() >= 8 {
+                &r.session_id[..8]
+            } else {
+                &r.session_id
+            };
+            println!("{sid} [{role}] {snippet}", role = r.role, snippet = r.snippet);
+        }
+        return Ok(());
+    }
+
     let sessions = store.list_sessions(limit)?;
 
     if sessions.is_empty() {
@@ -302,6 +323,17 @@ async fn cmd_run(
                 if !json_output {
                     let pct = (estimated_tokens * 100) / limit;
                     eprintln!("[context: ~{estimated_tokens}/{limit} tokens ({pct}%)]");
+                }
+            }
+            AgentEvent::AutoCompacted {
+                messages_removed,
+                before_tokens,
+                after_tokens,
+            } => {
+                if !json_output {
+                    eprintln!(
+                        "[auto-compacted: {messages_removed} messages, ~{before_tokens} → ~{after_tokens} tokens]"
+                    );
                 }
             }
             AgentEvent::Cancelled => {
