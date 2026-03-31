@@ -242,6 +242,11 @@ impl Agent {
         self.client.set_sampling(profile.sampling.clone());
     }
 
+    /// Clear sampling parameter overrides (revert to backend defaults).
+    pub fn clear_sampling(&mut self) {
+        self.client.clear_sampling();
+    }
+
     pub fn usage(&self) -> &TokenUsage {
         self.client.usage()
     }

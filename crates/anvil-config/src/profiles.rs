@@ -184,6 +184,17 @@ pub fn find_matching_profile<'a>(
 }
 
 /// Returns the directory path for model profiles within a harness.
+/// Load all bundled model profiles (compiled into the binary).
+///
+/// Useful when no `.anvil/models/` directory exists or when the caller
+/// needs profiles without filesystem access (e.g., during `/model` command).
+pub fn load_bundled_profiles() -> Vec<ModelProfile> {
+    BUNDLED_PROFILES
+        .iter()
+        .filter_map(|(_, content)| toml::from_str(content).ok())
+        .collect()
+}
+
 pub fn profiles_dir(harness_dir: &Path) -> PathBuf {
     harness_dir.join("models")
 }

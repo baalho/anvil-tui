@@ -5,8 +5,28 @@ pub enum CommandResult {
     Handled(String),
     /// Trigger context compaction (requires async agent interaction).
     Compact,
+    /// Start an interactive Ralph Loop with the given config.
+    Ralph(RalphArgs),
+    /// Start a managed backend process.
+    BackendStart(BackendStartArgs),
+    /// Stop the managed backend process.
+    BackendStop,
     Exit,
     Unknown(String),
+}
+
+/// Arguments for starting a managed backend.
+pub struct BackendStartArgs {
+    pub backend_type: String,
+    pub model_path: String,
+    pub port: u16,
+}
+
+/// Parsed arguments for an interactive `/ralph` command.
+pub struct RalphArgs {
+    pub prompt: String,
+    pub verify_command: String,
+    pub max_iterations: usize,
 }
 
 pub async fn handle_command(
@@ -28,9 +48,9 @@ pub async fn handle_command(
         }
         "/stats" => CommandResult::Handled(stats_text(agent, cumulative_usage)),
         "/model" => CommandResult::Handled(model_command(agent, arg).await),
-        "/backend" => CommandResult::Handled(backend_command(agent, arg)),
+        "/backend" => backend_command(agent, arg),
         "/history" => CommandResult::Handled(history_text(agent)),
-        "/ralph" => CommandResult::Handled(ralph_help(arg)),
+        "/ralph" => ralph_command(arg),
         "/clear" => CommandResult::Compact,
         "/think" => CommandResult::Handled(think_command(agent)),
         "/skill" => CommandResult::Handled(skill_command(agent, arg)),
@@ -45,6 +65,8 @@ fn help_text() -> String {
         "  /stats                       Token usage and session info",
         "  /model [name]                Show or switch model",
         "  /backend [type url]          Show or switch backend (ollama|llama|mlx|custom)",
+        "  /backend start llama <model>  Start a managed llama-server",
+        "  /backend stop                Stop the managed backend",
         "  /history                     List recent sessions",
         "  /skill [name]                List or activate a skill",
         "  /skill clear                 Deactivate all skills",
@@ -96,71 +118,198 @@ fn stats_text(agent: &Agent, usage: &TokenUsage) -> String {
 
 async fn model_command(agent: &mut Agent, arg: &str) -> String {
     if arg.is_empty() {
-        return format!("current model: {}", agent.model());
+        let mut info = format!("model:   {}", agent.model());
+        // Show active profile info
+        let profiles = anvil_config::load_bundled_profiles();
+        if let Some(profile) = anvil_config::find_matching_profile(&profiles, agent.model()) {
+            info.push_str(&format!("\nprofile: {}", profile.name));
+            if let Some(t) = profile.sampling.temperature {
+                info.push_str(&format!("\n  temperature:    {t}"));
+            }
+            if let Some(p) = profile.sampling.top_p {
+                info.push_str(&format!("\n  top_p:          {p}"));
+            }
+            if let Some(p) = profile.sampling.min_p {
+                info.push_str(&format!("\n  min_p:          {p}"));
+            }
+            if let Some(r) = profile.sampling.repeat_penalty {
+                info.push_str(&format!("\n  repeat_penalty: {r}"));
+            }
+            if profile.context.default_window > 0 {
+                info.push_str(&format!("\n  context_window: {}", profile.context.default_window));
+            }
+        } else {
+            info.push_str("\nprofile: (none)");
+        }
+        return info;
     }
 
-    // Query Ollama for available models
+    // Discover available models based on backend type
+    let models = discover_models(agent).await;
+
+    let model_name = if models.is_empty() {
+        // Can't discover — just set the model directly
+        arg.to_string()
+    } else if models.iter().any(|m| m == arg || m.starts_with(&format!("{arg}:"))) {
+        if models.contains(&arg.to_string()) {
+            arg.to_string()
+        } else {
+            models
+                .iter()
+                .find(|m| m.starts_with(&format!("{arg}:")))
+                .cloned()
+                .unwrap_or_else(|| arg.to_string())
+        }
+    } else {
+        let available = models.join(", ");
+        return format!("model '{arg}' not found. available: {available}");
+    };
+
+    agent.set_model(model_name.clone());
+
+    // Apply matching model profile
+    let profiles = anvil_config::load_bundled_profiles();
+    let mut result = format!("switched to model: {model_name}");
+    if let Some(profile) = anvil_config::find_matching_profile(&profiles, &model_name) {
+        agent.apply_model_profile(profile);
+        result.push_str(&format!(" (profile: {})", profile.name));
+    } else {
+        // Clear any previous profile's sampling overrides
+        agent.clear_sampling();
+        result.push_str(" (no profile)");
+    }
+
+    result
+}
+
+/// Discover available models from the backend.
+///
+/// Uses `/api/tags` for Ollama, `/v1/models` for other backends.
+async fn discover_models(agent: &Agent) -> Vec<String> {
     let base = agent.base_url().trim_end_matches("/v1");
-    let url = format!("{base}/api/tags");
 
-    match reqwest::get(&url).await {
-        Ok(resp) => match resp.json::<serde_json::Value>().await {
-            Ok(body) => {
-                let models = body["models"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|m| m["name"].as_str().map(String::from))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-
-                if models
-                    .iter()
-                    .any(|m| m == arg || m.starts_with(&format!("{arg}:")))
-                {
-                    let model_name = if models.contains(&arg.to_string()) {
-                        arg.to_string()
-                    } else {
-                        models
-                            .iter()
-                            .find(|m| m.starts_with(&format!("{arg}:")))
-                            .cloned()
-                            .unwrap_or_else(|| arg.to_string())
-                    };
-                    agent.set_model(model_name.clone());
-                    format!("switched to model: {model_name}")
-                } else {
-                    let available = models.join(", ");
-                    format!("model '{arg}' not found. available: {available}")
-                }
+    match agent.backend() {
+        anvil_config::BackendKind::Ollama => {
+            let url = format!("{base}/api/tags");
+            match reqwest::get(&url).await {
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
+                    Ok(body) => body["models"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|m| m["name"].as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                },
+                Err(_) => Vec::new(),
             }
-            Err(e) => format!("failed to parse Ollama response: {e}"),
-        },
-        Err(e) => format!("failed to connect to Ollama: {e}"),
+        }
+        _ => {
+            // OpenAI-compatible /v1/models endpoint
+            let url = format!("{}/models", agent.base_url().trim_end_matches('/'));
+            match reqwest::get(&url).await {
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
+                    Ok(body) => body["data"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|m| m["id"].as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                },
+                Err(_) => Vec::new(),
+            }
+        }
     }
 }
 
-/// Handle `/ralph` — show usage info for autonomous mode.
+/// Handle `/ralph` — parse arguments and start an interactive Ralph Loop.
 ///
-/// The actual Ralph Loop execution happens in interactive.rs when the user
-/// provides a prompt with --verify. This command just shows help.
-fn ralph_help(arg: &str) -> String {
+/// # Usage
+/// - `/ralph` — show help
+/// - `/ralph fix tests --verify cargo test` — run loop with prompt and verify command
+/// - `/ralph fix tests --verify cargo test --max-iterations 5` — with iteration limit
+fn ralph_command(arg: &str) -> CommandResult {
     if arg.is_empty() {
-        return [
-            "Ralph Loop (autonomous mode):",
-            "",
-            "Usage from CLI:",
-            "  anvil run -p 'fix all tests' -a --verify 'cargo test'",
-            "  anvil run -p 'deploy stack' -a --verify 'docker compose ps' --max-iterations 5",
-            "",
-            "The agent runs your prompt, then checks the verify command.",
-            "If verify fails, the failure output is fed back for another attempt.",
-            "Stops when verify passes or limits are hit.",
-        ]
-        .join("\n");
+        return CommandResult::Handled(
+            [
+                "Ralph Loop (autonomous mode):",
+                "",
+                "Usage:",
+                "  /ralph <prompt> --verify <cmd>",
+                "  /ralph <prompt> --verify <cmd> --max-iterations 5",
+                "",
+                "Example:",
+                "  /ralph fix all failing tests --verify cargo test",
+                "",
+                "The agent runs your prompt, then checks the verify command.",
+                "If verify fails, the failure output is fed back for another attempt.",
+                "Ctrl+C stops the loop and returns to the prompt.",
+            ]
+            .join("\n"),
+        );
     }
-    "ralph loop is available via: anvil run -p '<prompt>' -a --verify '<cmd>'".to_string()
+
+    // Parse --verify and --max-iterations from the argument string
+    let (prompt, verify_cmd, max_iter) = match parse_ralph_args(arg) {
+        Ok(parsed) => parsed,
+        Err(e) => return CommandResult::Handled(format!("error: {e}")),
+    };
+
+    if verify_cmd.is_empty() {
+        return CommandResult::Handled(
+            "error: --verify <cmd> is required. Example: /ralph fix tests --verify cargo test"
+                .to_string(),
+        );
+    }
+
+    CommandResult::Ralph(RalphArgs {
+        prompt,
+        verify_command: verify_cmd,
+        max_iterations: max_iter,
+    })
+}
+
+/// Parse `/ralph` arguments: `<prompt> --verify <cmd> [--max-iterations N]`
+fn parse_ralph_args(input: &str) -> Result<(String, String, usize), String> {
+    let mut prompt_parts = Vec::new();
+    let mut verify_parts = Vec::new();
+    let mut max_iterations: usize = 10;
+    let mut in_verify = false;
+    let mut expect_max_iter = false;
+
+    for token in input.split_whitespace() {
+        if token == "--verify" {
+            in_verify = true;
+            continue;
+        }
+        if token == "--max-iterations" {
+            expect_max_iter = true;
+            continue;
+        }
+        if expect_max_iter {
+            max_iterations = token
+                .parse()
+                .map_err(|_| format!("invalid --max-iterations value: {token}"))?;
+            expect_max_iter = false;
+            continue;
+        }
+        // Once we hit --verify, everything after goes to verify (until --max-iterations)
+        if in_verify {
+            verify_parts.push(token);
+        } else {
+            prompt_parts.push(token);
+        }
+    }
+
+    let prompt = prompt_parts.join(" ");
+    let verify_cmd = verify_parts.join(" ");
+
+    Ok((prompt, verify_cmd, max_iterations))
 }
 
 /// Handle `/backend` — show or switch the inference backend.
@@ -175,17 +324,45 @@ fn ralph_help(arg: &str) -> String {
 /// Different models work better with different backends. GLM-4.7-Flash has
 /// chat template bugs on Ollama but works perfectly on llama-server.
 /// This command lets users switch without restarting Anvil.
-fn backend_command(agent: &mut Agent, arg: &str) -> String {
+fn backend_command(agent: &mut Agent, arg: &str) -> CommandResult {
     if arg.is_empty() {
-        return format!(
+        return CommandResult::Handled(format!(
             "backend: {}\nurl:     {}",
             agent.backend(),
             agent.base_url()
-        );
+        ));
     }
 
-    let parts: Vec<&str> = arg.splitn(2, ' ').collect();
-    let backend_str = parts[0];
+    let parts: Vec<&str> = arg.splitn(3, ' ').collect();
+    let subcommand = parts[0];
+
+    // Handle start/stop subcommands
+    if subcommand == "start" {
+        let backend_type = parts.get(1).copied().unwrap_or("");
+        let model_path = parts.get(2).copied().unwrap_or("");
+
+        if backend_type.is_empty() || model_path.is_empty() {
+            return CommandResult::Handled(
+                "usage: /backend start llama <model_path.gguf> [--port 8080]".to_string(),
+            );
+        }
+
+        // Parse optional port from model_path (could contain --port N)
+        let (actual_model, port) = parse_backend_start_args(model_path);
+
+        return CommandResult::BackendStart(BackendStartArgs {
+            backend_type: backend_type.to_string(),
+            model_path: actual_model,
+            port,
+        });
+    }
+
+    if subcommand == "stop" {
+        return CommandResult::BackendStop;
+    }
+
+    // Original backend switching logic
+    let backend_str = subcommand;
     let url = parts.get(1).map(|s| s.trim());
 
     let backend = match backend_str {
@@ -194,10 +371,10 @@ fn backend_command(agent: &mut Agent, arg: &str) -> String {
         "mlx" => anvil_config::BackendKind::Mlx,
         "custom" => anvil_config::BackendKind::Custom,
         _ => {
-            return format!(
-                "unknown backend '{}'. options: ollama, llama, mlx, custom",
+            return CommandResult::Handled(format!(
+                "unknown backend '{}'. options: ollama, llama, mlx, custom, start, stop",
                 backend_str
-            )
+            ))
         }
     };
 
@@ -208,14 +385,41 @@ fn backend_command(agent: &mut Agent, arg: &str) -> String {
             anvil_config::BackendKind::LlamaServer => "http://localhost:8080/v1".to_string(),
             anvil_config::BackendKind::Mlx => "http://localhost:8080/v1".to_string(),
             anvil_config::BackendKind::Custom => {
-                return "custom backend requires a URL: /backend custom http://host:port/v1"
-                    .to_string()
+                return CommandResult::Handled(
+                    "custom backend requires a URL: /backend custom http://host:port/v1"
+                        .to_string(),
+                )
             }
         },
     };
 
     agent.set_backend(backend.clone(), base_url.clone());
-    format!("switched to {} at {}", backend, base_url)
+    CommandResult::Handled(format!("switched to {} at {}", backend, base_url))
+}
+
+/// Parse model path and optional --port from backend start args.
+fn parse_backend_start_args(input: &str) -> (String, u16) {
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    let mut model_path = String::new();
+    let mut port: u16 = 8080;
+    let mut expect_port = false;
+
+    for part in parts {
+        if part == "--port" {
+            expect_port = true;
+            continue;
+        }
+        if expect_port {
+            port = part.parse().unwrap_or(8080);
+            expect_port = false;
+            continue;
+        }
+        if model_path.is_empty() {
+            model_path = part.to_string();
+        }
+    }
+
+    (model_path, port)
 }
 
 /// Handle `/skill` — list, activate, deactivate, or verify skills.
@@ -414,3 +618,67 @@ fn history_text(agent: &Agent) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ralph_args_basic() {
+        let (prompt, verify, max) = parse_ralph_args("fix tests --verify cargo test").unwrap();
+        assert_eq!(prompt, "fix tests");
+        assert_eq!(verify, "cargo test");
+        assert_eq!(max, 10);
+    }
+
+    #[test]
+    fn parse_ralph_args_with_max_iterations() {
+        let (prompt, verify, max) =
+            parse_ralph_args("fix it --verify make check --max-iterations 5").unwrap();
+        assert_eq!(prompt, "fix it");
+        assert_eq!(verify, "make check");
+        assert_eq!(max, 5);
+    }
+
+    #[test]
+    fn parse_ralph_args_no_verify() {
+        let (prompt, verify, _) = parse_ralph_args("fix tests").unwrap();
+        assert_eq!(prompt, "fix tests");
+        assert!(verify.is_empty());
+    }
+
+    #[test]
+    fn parse_ralph_args_invalid_max() {
+        let result = parse_ralph_args("fix --verify test --max-iterations abc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn ralph_command_no_args_shows_help() {
+        let result = ralph_command("");
+        assert!(matches!(result, CommandResult::Handled(_)));
+    }
+
+    #[test]
+    fn ralph_command_missing_verify_shows_error() {
+        let result = ralph_command("fix tests");
+        match result {
+            CommandResult::Handled(msg) => assert!(msg.contains("--verify")),
+            _ => panic!("expected Handled with error"),
+        }
+    }
+
+    #[test]
+    fn ralph_command_valid_returns_ralph() {
+        let result = ralph_command("fix tests --verify cargo test");
+        match result {
+            CommandResult::Ralph(args) => {
+                assert_eq!(args.prompt, "fix tests");
+                assert_eq!(args.verify_command, "cargo test");
+                assert_eq!(args.max_iterations, 10);
+            }
+            _ => panic!("expected Ralph variant"),
+        }
+    }
+}
+
