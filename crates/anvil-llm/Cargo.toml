@@ -18,3 +18,7 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+tempfile = { workspace = true }

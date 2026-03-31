@@ -5,9 +5,19 @@ use anyhow::Result;
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::{execute, terminal};
 use std::io::{self, BufRead, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::commands::{self, CommandResult};
+
+/// Tracks Ctrl+C state for double-press exit detection.
+struct CtrlCState {
+    /// Set to true when a Ctrl+C is received during a turn.
+    /// If already true when another Ctrl+C arrives, exit the process.
+    pending: AtomicBool,
+}
 
 pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> Result<()> {
     print_banner(&agent);
@@ -21,8 +31,49 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
     let mut cumulative_usage = TokenUsage::default();
     let mut agent_slot: Option<Agent> = Some(agent);
 
+    // Shared state for Ctrl+C handling
+    let ctrlc_state = Arc::new(CtrlCState {
+        pending: AtomicBool::new(false),
+    });
+    // The active cancellation token for the current turn (if any).
+    // Wrapped in Arc<Mutex> so the ctrlc handler can access it.
+    let active_cancel: Arc<std::sync::Mutex<Option<CancellationToken>>> =
+        Arc::new(std::sync::Mutex::new(None));
+
+    // Set up Ctrl+C handler
+    {
+        let ctrlc_state = ctrlc_state.clone();
+        let active_cancel = active_cancel.clone();
+        ctrlc::set_handler(move || {
+            // If there's an active turn, cancel it
+            if let Ok(guard) = active_cancel.lock() {
+                if let Some(token) = guard.as_ref() {
+                    if !token.is_cancelled() {
+                        token.cancel();
+                        ctrlc_state.pending.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                }
+            }
+            // Double Ctrl+C or no active turn — exit immediately
+            if ctrlc_state.pending.load(Ordering::SeqCst) {
+                // Ensure terminal is in a sane state before exit
+                let _ = terminal::disable_raw_mode();
+                eprintln!("\nexiting");
+                std::process::exit(130);
+            }
+            // No active turn — just exit
+            let _ = terminal::disable_raw_mode();
+            eprintln!("\nexiting");
+            std::process::exit(130);
+        })?;
+    }
+
     loop {
         let agent = agent_slot.as_mut().expect("agent lost");
+
+        // Reset Ctrl+C state between turns
+        ctrlc_state.pending.store(false, Ordering::SeqCst);
 
         execute!(
             io::stdout(),
@@ -50,6 +101,63 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                     }
                     continue;
                 }
+                CommandResult::Compact => {
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::DarkYellow),
+                        Print("  [compacting context...]\n"),
+                        ResetColor,
+                    )?;
+                    io::stdout().flush()?;
+
+                    let cancel = CancellationToken::new();
+                    let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(64);
+
+                    let mut moved_agent = agent_slot.take().unwrap();
+                    let compact_handle = tokio::spawn(async move {
+                        let result = moved_agent.compact(4, &event_tx, cancel).await;
+                        (moved_agent, result)
+                    });
+
+                    match compact_handle.await {
+                        Ok((returned_agent, Ok(result))) => {
+                            agent_slot = Some(returned_agent);
+                            if result.messages_removed == 0 {
+                                execute!(
+                                    io::stdout(),
+                                    SetForegroundColor(Color::DarkYellow),
+                                    Print("  [nothing to compact]\n"),
+                                    ResetColor,
+                                )?;
+                            } else {
+                                execute!(
+                                    io::stdout(),
+                                    SetForegroundColor(Color::Green),
+                                    Print(format!(
+                                        "  [compacted: {} messages removed, ~{} → ~{} tokens]\n",
+                                        result.messages_removed,
+                                        result.before_tokens,
+                                        result.after_tokens,
+                                    )),
+                                    ResetColor,
+                                )?;
+                            }
+                        }
+                        Ok((returned_agent, Err(e))) => {
+                            agent_slot = Some(returned_agent);
+                            execute!(
+                                io::stdout(),
+                                SetForegroundColor(Color::Red),
+                                Print(format!("  [compaction failed: {e}]\n")),
+                                ResetColor,
+                            )?;
+                        }
+                        Err(e) => {
+                            return Err(anyhow::anyhow!("compaction task panicked: {e}"));
+                        }
+                    }
+                    continue;
+                }
                 CommandResult::Exit => break,
                 CommandResult::Unknown(cmd) => {
                     eprintln!("unknown command: {cmd} — try /help");
@@ -58,19 +166,47 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
             }
         }
 
+        // Create a cancellation token for this turn
+        let cancel = CancellationToken::new();
+        {
+            let mut guard = active_cancel.lock().unwrap();
+            *guard = Some(cancel.clone());
+        }
+
         let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(64);
         let (perm_tx, perm_rx) = mpsc::channel::<PermissionDecision>(1);
 
         let prompt_owned = trimmed.to_string();
         let mut moved_agent = agent_slot.take().unwrap();
+        let turn_cancel = cancel.clone();
         let turn_handle = tokio::spawn(async move {
-            let result = moved_agent.turn(&prompt_owned, &event_tx, perm_rx).await;
+            let result = moved_agent
+                .turn(&prompt_owned, &event_tx, perm_rx, turn_cancel)
+                .await;
             (moved_agent, result)
         });
 
         let mut needs_newline = false;
         while let Some(event) = event_rx.recv().await {
             match event {
+                AgentEvent::ThinkingDelta(text) => {
+                    if !needs_newline {
+                        execute!(
+                            io::stdout(),
+                            SetForegroundColor(Color::Cyan),
+                            Print("anvil> "),
+                            ResetColor,
+                        )?;
+                        needs_newline = true;
+                    }
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::DarkGrey),
+                        Print(&text),
+                        ResetColor,
+                    )?;
+                    io::stdout().flush()?;
+                }
                 AgentEvent::ContentDelta(text) => {
                     if !needs_newline {
                         execute!(
@@ -124,6 +260,19 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                     }
                     println!();
                 }
+                AgentEvent::Cancelled => {
+                    if needs_newline {
+                        println!();
+                        needs_newline = false;
+                    }
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::DarkYellow),
+                        Print("  [cancelled]\n"),
+                        ResetColor,
+                    )?;
+                    println!();
+                }
                 AgentEvent::Retry {
                     attempt,
                     max,
@@ -173,6 +322,12 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                     )?;
                 }
             }
+        }
+
+        // Clear the active cancel token
+        {
+            let mut guard = active_cancel.lock().unwrap();
+            *guard = None;
         }
 
         match turn_handle.await {

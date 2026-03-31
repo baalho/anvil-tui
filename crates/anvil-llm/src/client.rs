@@ -21,6 +21,7 @@ use anvil_config::{ProviderConfig, SamplingConfig};
 use anyhow::{bail, Result};
 use reqwest::Client;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// HTTP client for OpenAI-compatible chat completion APIs.
 ///
@@ -182,9 +183,15 @@ impl LlmClient {
     /// - `ToolCallDelta` — incremental tool call assembly
     /// - `Usage` — final token counts
     /// - `Done` — stream finished
+    ///
+    /// # Cancellation
+    /// When the `cancel` token is triggered (e.g. by Ctrl+C), the SSE processing
+    /// task stops reading and emits `StreamEvent::Done`. The HTTP response is
+    /// dropped, which aborts the in-flight request.
     pub async fn chat_stream(
         &mut self,
         request: &mut ChatRequest,
+        cancel: CancellationToken,
         mut on_retry: impl FnMut(usize, usize, std::time::Duration) + Send + 'static,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         request.model.clone_from(&self.config.model);
@@ -230,10 +237,9 @@ impl LlmClient {
         .await?;
 
         let (tx, rx) = mpsc::channel(64);
-        let pricing = self.config.pricing.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = process_sse_stream(resp, &tx, pricing).await {
+            if let Err(e) = process_sse_stream(resp, &tx, cancel).await {
                 tracing::error!("SSE stream error: {e}");
             }
             let _ = tx.send(StreamEvent::Done).await;
@@ -249,10 +255,15 @@ impl LlmClient {
     }
 }
 
+/// Process SSE stream, stopping early if the cancellation token fires.
+///
+/// When cancelled, the response is dropped (aborting the HTTP connection)
+/// and any content received so far is preserved — the caller sees whatever
+/// `ContentDelta` and `ToolCallDelta` events were already sent.
 async fn process_sse_stream(
     resp: reqwest::Response,
     tx: &mpsc::Sender<StreamEvent>,
-    _pricing: Option<anvil_config::PricingConfig>,
+    cancel: CancellationToken,
 ) -> Result<()> {
     use tokio::io::AsyncBufReadExt;
     use tokio_stream::StreamExt;
@@ -264,7 +275,21 @@ async fn process_sse_stream(
 
     let mut tool_acc = ToolCallAccumulator::default();
 
-    while let Some(line) = lines.next_line().await? {
+    loop {
+        let line = tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::debug!("SSE stream cancelled");
+                break;
+            }
+            result = lines.next_line() => {
+                match result {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        };
+
         let line = line.trim().to_string();
         if line.is_empty() || line.starts_with(':') {
             continue;

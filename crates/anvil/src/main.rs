@@ -8,6 +8,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
 #[command(
@@ -233,9 +234,14 @@ async fn cmd_run(
     let prompt_owned = prompt.to_string();
     let json_output = output_format == "json";
     let mut final_content = String::new();
+    let cancel = CancellationToken::new();
 
-    let turn_handle =
-        tokio::spawn(async move { agent.turn(&prompt_owned, &event_tx, perm_rx).await });
+    let turn_cancel = cancel.clone();
+    let turn_handle = tokio::spawn(async move {
+        agent
+            .turn(&prompt_owned, &event_tx, perm_rx, turn_cancel)
+            .await
+    });
 
     while let Some(event) = event_rx.recv().await {
         match event {
@@ -245,6 +251,9 @@ async fn cmd_run(
                 } else {
                     print!("{text}");
                 }
+            }
+            AgentEvent::ThinkingDelta(_) => {
+                // In non-interactive mode, thinking deltas are silently discarded
             }
             AgentEvent::ToolCallPending {
                 name, arguments, ..
@@ -292,6 +301,11 @@ async fn cmd_run(
                 if !json_output {
                     let pct = (estimated_tokens * 100) / limit;
                     eprintln!("[context: ~{estimated_tokens}/{limit} tokens ({pct}%)]");
+                }
+            }
+            AgentEvent::Cancelled => {
+                if !json_output {
+                    eprintln!("\n[cancelled]");
                 }
             }
             AgentEvent::Error(e) => {
@@ -400,8 +414,11 @@ async fn cmd_run_autonomous(
         });
 
         let prompt_clone = current_prompt.clone();
+        let turn_cancel = CancellationToken::new();
         let turn_handle = tokio::spawn(async move {
-            let result = agent.turn(&prompt_clone, &event_tx, perm_rx).await;
+            let result = agent
+                .turn(&prompt_clone, &event_tx, perm_rx, turn_cancel)
+                .await;
             result.map(|()| agent)
         });
 

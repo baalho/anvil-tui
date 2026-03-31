@@ -1,5 +1,6 @@
 use crate::session::{SessionStatus, SessionStore, ToolCallEntry};
 use crate::system_prompt::build_system_prompt;
+use crate::thinking::ThinkingFilter;
 use anvil_config::Settings;
 use anvil_llm::{
     ChatMessage, ChatRequest, LlmClient, StreamEvent, TokenUsage, ToolCallAccumulator,
@@ -8,10 +9,13 @@ use anvil_tools::{all_tool_definitions, PermissionDecision, ToolExecutor};
 use anyhow::Result;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// Events emitted by the agent loop for the UI to consume.
 #[derive(Debug)]
 pub enum AgentEvent {
+    /// Thinking content from `<think>` blocks (only emitted when thinking is visible).
+    ThinkingDelta(String),
     /// Assistant is producing text content.
     ContentDelta(String),
     /// Assistant wants to call a tool — awaiting permission.
@@ -39,8 +43,21 @@ pub enum AgentEvent {
         estimated_tokens: usize,
         limit: usize,
     },
+    /// Turn was cancelled (e.g. by Ctrl+C). Partial content may have been emitted.
+    Cancelled,
     /// Error occurred.
     Error(String),
+}
+
+/// Result of context compaction.
+#[derive(Debug)]
+pub struct CompactionResult {
+    /// Estimated token count before compaction.
+    pub before_tokens: usize,
+    /// Estimated token count after compaction.
+    pub after_tokens: usize,
+    /// Number of messages removed and replaced with summary.
+    pub messages_removed: usize,
 }
 
 pub struct Agent {
@@ -55,6 +72,7 @@ pub struct Agent {
     loop_detection_limit: usize,
     tool_call_hashes: Vec<u64>,
     active_skills: Vec<crate::skills::Skill>,
+    thinking_filter: ThinkingFilter,
 }
 
 impl Agent {
@@ -90,6 +108,7 @@ impl Agent {
             loop_detection_limit,
             tool_call_hashes: Vec::new(),
             active_skills: Vec::new(),
+            thinking_filter: ThinkingFilter::new(),
         })
     }
 
@@ -163,6 +182,7 @@ impl Agent {
             loop_detection_limit,
             tool_call_hashes: Vec::new(),
             active_skills: Vec::new(),
+            thinking_filter: ThinkingFilter::new(),
         })
     }
 
@@ -176,6 +196,16 @@ impl Agent {
 
     pub fn workspace(&self) -> &std::path::Path {
         &self._workspace
+    }
+
+    /// Toggle whether `<think>` blocks are shown in output.
+    pub fn set_show_thinking(&mut self, show: bool) {
+        self.thinking_filter.set_show_thinking(show);
+    }
+
+    /// Whether `<think>` blocks are currently shown.
+    pub fn show_thinking(&self) -> bool {
+        self.thinking_filter.show_thinking()
     }
 
     pub fn base_url(&self) -> &str {
@@ -228,6 +258,135 @@ impl Agent {
     pub fn end_session(&self) -> Result<()> {
         self.store
             .update_session_status(&self.session_id, &SessionStatus::Completed)
+    }
+
+    /// Compact the conversation context by summarizing old messages.
+    ///
+    /// # How it works
+    /// 1. Preserves the system prompt and the most recent `keep_recent` messages
+    /// 2. Sends the middle messages to the LLM with a compaction prompt
+    /// 3. Replaces them with a single summary message
+    /// 4. Returns before/after token estimates
+    ///
+    /// # Why not just truncate?
+    /// Summarization preserves key decisions and context that simple truncation
+    /// would lose. The LLM produces a condensed version of the conversation.
+    pub async fn compact(
+        &mut self,
+        keep_recent: usize,
+        event_tx: &mpsc::Sender<AgentEvent>,
+        cancel: CancellationToken,
+    ) -> Result<CompactionResult> {
+        let before_tokens = self.estimate_context_tokens();
+
+        let (compact_start, compact_end) = match compaction_range(self.messages.len(), keep_recent)
+        {
+            Some(range) => range,
+            None => {
+                return Ok(CompactionResult {
+                    before_tokens,
+                    after_tokens: before_tokens,
+                    messages_removed: 0,
+                })
+            }
+        };
+
+        // Build a summary of the messages to compact
+        let messages_to_compact = &self.messages[compact_start..compact_end];
+        let mut summary_input = String::new();
+        for msg in messages_to_compact {
+            let role = match msg.role {
+                anvil_llm::Role::User => "User",
+                anvil_llm::Role::Assistant => "Assistant",
+                anvil_llm::Role::Tool => "Tool",
+                anvil_llm::Role::System => "System",
+            };
+            let content = msg.content.as_deref().unwrap_or("");
+            // Truncate long tool results in the summary input
+            let truncated = if content.len() > 500 {
+                format!("{}... [truncated]", &content[..500])
+            } else {
+                content.to_string()
+            };
+            summary_input.push_str(&format!("{role}: {truncated}\n\n"));
+        }
+
+        let compaction_prompt = format!(
+            "Summarize the following conversation history in a concise paragraph. \
+             Preserve key decisions, file paths, tool results, and any important context. \
+             Do not include greetings or filler.\n\n{summary_input}"
+        );
+
+        // Send compaction request to LLM
+        let mut request = ChatRequest {
+            model: String::new(),
+            messages: vec![
+                ChatMessage::system(
+                    "You are a conversation summarizer. Output only the summary, nothing else."
+                        .to_string(),
+                ),
+                ChatMessage::user(&compaction_prompt),
+            ],
+            tools: None,
+            temperature: Some(0.3),
+            top_p: None,
+            min_p: None,
+            repeat_penalty: None,
+            top_k: None,
+            stream: true,
+        };
+
+        let mut rx = self
+            .client
+            .chat_stream(&mut request, cancel.clone(), |_, _, _| {})
+            .await?;
+
+        let mut summary = String::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                StreamEvent::ContentDelta(delta) => {
+                    summary.push_str(&delta);
+                }
+                StreamEvent::Usage(u) => {
+                    self.client
+                        .record_stream_usage(u.prompt_tokens, u.completion_tokens);
+                }
+                StreamEvent::Done => break,
+                _ => {}
+            }
+        }
+
+        if cancel.is_cancelled() || summary.is_empty() {
+            return Ok(CompactionResult {
+                before_tokens,
+                after_tokens: before_tokens,
+                messages_removed: 0,
+            });
+        }
+
+        // Replace compacted messages with summary
+        let messages_removed = compact_end - compact_start;
+        let summary_msg = ChatMessage::user(format!(
+            "[Context summary of {messages_removed} previous messages]\n{summary}"
+        ));
+
+        let mut new_messages = Vec::new();
+        new_messages.push(self.messages[0].clone()); // system prompt
+        new_messages.push(summary_msg);
+        new_messages.extend_from_slice(&self.messages[compact_end..]);
+        self.messages = new_messages;
+
+        let after_tokens = self.estimate_context_tokens();
+
+        let _ = event_tx
+            .send(AgentEvent::Usage(self.client.usage().clone()))
+            .await;
+
+        Ok(CompactionResult {
+            before_tokens,
+            after_tokens,
+            messages_removed,
+        })
     }
 
     /// Activate a skill — injects its content into the system prompt and
@@ -356,11 +515,17 @@ impl Agent {
 
     /// Run one turn of the agent loop: send user message, get response,
     /// handle tool calls, return events via channel.
+    ///
+    /// # Cancellation
+    /// When the `cancel` token fires, the current LLM stream or tool execution
+    /// is aborted. Partial content received before cancellation is saved to the
+    /// session. The turn returns `Ok(())` after emitting `AgentEvent::Cancelled`.
     pub async fn turn(
         &mut self,
         user_input: &str,
         event_tx: &mpsc::Sender<AgentEvent>,
         mut permission_rx: mpsc::Receiver<PermissionDecision>,
+        cancel: CancellationToken,
     ) -> Result<()> {
         let user_msg = ChatMessage::user(user_input);
         self.messages.push(user_msg);
@@ -369,6 +534,12 @@ impl Agent {
 
         // Agent loop: keep going until the assistant responds without tool calls
         loop {
+            // Check cancellation before starting a new LLM call
+            if cancel.is_cancelled() {
+                let _ = event_tx.send(AgentEvent::Cancelled).await;
+                return Ok(());
+            }
+
             // Context window check
             if self.context_limit > 0 {
                 let estimated = self.estimate_context_tokens();
@@ -402,7 +573,7 @@ impl Agent {
             let event_tx_retry = event_tx.clone();
             let mut rx = self
                 .client
-                .chat_stream(&mut request, move |attempt, max, delay| {
+                .chat_stream(&mut request, cancel.clone(), move |attempt, max, delay| {
                     let _ = event_tx_retry.try_send(AgentEvent::Retry {
                         attempt,
                         max,
@@ -414,12 +585,26 @@ impl Agent {
             let mut content_buf = String::new();
             let mut tool_acc = ToolCallAccumulator::default();
             let mut _stream_usage = None;
+            let mut was_cancelled = false;
 
             while let Some(event) = rx.recv().await {
                 match event {
                     StreamEvent::ContentDelta(delta) => {
+                        // Store full content (including thinking) for session history
                         content_buf.push_str(&delta);
-                        let _ = event_tx.send(AgentEvent::ContentDelta(delta)).await;
+
+                        // Filter thinking blocks for display
+                        let result = self.thinking_filter.push(&delta);
+                        if !result.display.is_empty() {
+                            let _ = event_tx
+                                .send(AgentEvent::ContentDelta(result.display))
+                                .await;
+                        }
+                        if !result.thinking.is_empty() {
+                            let _ = event_tx
+                                .send(AgentEvent::ThinkingDelta(result.thinking))
+                                .await;
+                        }
                     }
                     StreamEvent::ToolCallDelta {
                         index,
@@ -438,13 +623,26 @@ impl Agent {
                 }
             }
 
+            // Flush any buffered thinking content
+            let flush_result = self.thinking_filter.flush();
+            if !flush_result.display.is_empty() {
+                let _ = event_tx
+                    .send(AgentEvent::ContentDelta(flush_result.display))
+                    .await;
+            }
+
+            // Check if we were cancelled during streaming
+            if cancel.is_cancelled() {
+                was_cancelled = true;
+            }
+
             let _ = event_tx
                 .send(AgentEvent::Usage(self.client.usage().clone()))
                 .await;
 
             let tool_calls = tool_acc.finish();
 
-            // Save assistant message
+            // Save assistant message (including partial content from cancellation)
             let tc_json = if tool_calls.is_empty() {
                 None
             } else {
@@ -470,6 +668,12 @@ impl Agent {
             }
             self.messages.push(assistant_msg);
 
+            // If cancelled, save partial state and exit
+            if was_cancelled {
+                let _ = event_tx.send(AgentEvent::Cancelled).await;
+                return Ok(());
+            }
+
             if tool_calls.is_empty() {
                 let _ = event_tx.send(AgentEvent::TurnComplete).await;
                 return Ok(());
@@ -477,6 +681,12 @@ impl Agent {
 
             // Process tool calls sequentially
             for tc in &tool_calls {
+                // Check cancellation between tool calls
+                if cancel.is_cancelled() {
+                    let _ = event_tx.send(AgentEvent::Cancelled).await;
+                    return Ok(());
+                }
+
                 let args: serde_json::Value =
                     serde_json::from_str(&tc.function.arguments).unwrap_or_default();
 
@@ -585,5 +795,78 @@ impl Agent {
 
             // Loop back to let the LLM respond to tool results
         }
+    }
+}
+
+/// Split a message list for compaction: returns (compact_start, compact_end).
+/// Messages in [compact_start..compact_end] should be summarized.
+/// Returns None if there aren't enough messages to compact.
+fn compaction_range(total_messages: usize, keep_recent: usize) -> Option<(usize, usize)> {
+    if total_messages <= keep_recent + 1 {
+        return None;
+    }
+    let compact_start = 1; // skip system prompt
+    let compact_end = total_messages.saturating_sub(keep_recent);
+    if compact_end <= compact_start {
+        return None;
+    }
+    Some((compact_start, compact_end))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compaction_range_too_few_messages() {
+        // system + 3 messages, keep_recent=4 → nothing to compact
+        assert_eq!(compaction_range(4, 4), None);
+    }
+
+    #[test]
+    fn compaction_range_exactly_enough() {
+        // system + 5 messages, keep_recent=4 → compact 1 message
+        assert_eq!(compaction_range(6, 4), Some((1, 2)));
+    }
+
+    #[test]
+    fn compaction_range_many_messages() {
+        // system + 19 messages, keep_recent=4 → compact 15 messages
+        assert_eq!(compaction_range(20, 4), Some((1, 16)));
+    }
+
+    #[test]
+    fn compaction_range_keep_recent_zero() {
+        // system + 5 messages, keep_recent=0 → compact all non-system
+        assert_eq!(compaction_range(6, 0), Some((1, 6)));
+    }
+
+    #[test]
+    fn compaction_preserves_system_and_recent() {
+        // Simulate message list: [system, u1, a1, u2, a2, u3, a3]
+        let messages = [
+            ChatMessage::system("system prompt".to_string()),
+            ChatMessage::user("q1"),
+            ChatMessage::assistant("a1"),
+            ChatMessage::user("q2"),
+            ChatMessage::assistant("a2"),
+            ChatMessage::user("q3"),
+            ChatMessage::assistant("a3"),
+        ];
+
+        let (start, end) = compaction_range(messages.len(), 4).unwrap();
+        assert_eq!(start, 1);
+        assert_eq!(end, 3); // compact messages[1..3] = [u1, a1]
+
+        // Verify preserved messages
+        let preserved_before = &messages[0..1]; // system
+        let preserved_after = &messages[end..]; // [u2, a2, u3, a3]
+        assert_eq!(preserved_before.len(), 1);
+        assert_eq!(preserved_after.len(), 4);
+        assert_eq!(
+            preserved_before[0].content.as_deref(),
+            Some("system prompt")
+        );
+        assert_eq!(preserved_after[0].content.as_deref(), Some("q2"));
     }
 }

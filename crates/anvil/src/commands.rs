@@ -3,6 +3,8 @@ use anvil_llm::TokenUsage;
 
 pub enum CommandResult {
     Handled(String),
+    /// Trigger context compaction (requires async agent interaction).
+    Compact,
     Exit,
     Unknown(String),
 }
@@ -29,7 +31,8 @@ pub async fn handle_command(
         "/backend" => CommandResult::Handled(backend_command(agent, arg)),
         "/history" => CommandResult::Handled(history_text(agent)),
         "/ralph" => CommandResult::Handled(ralph_help(arg)),
-        "/clear" => CommandResult::Handled("context compaction not yet implemented".to_string()),
+        "/clear" => CommandResult::Compact,
+        "/think" => CommandResult::Handled(think_command(agent)),
         "/skill" => CommandResult::Handled(skill_command(agent, arg)),
         _ => CommandResult::Unknown(cmd.to_string()),
     }
@@ -48,9 +51,20 @@ fn help_text() -> String {
         "  /skill verify <name>         Run a skill's verification command",
         "  /ralph <prompt> --verify <cmd> Run autonomous mode (Ralph Loop)",
         "  /clear                       Compact conversation context",
+        "  /think                       Toggle <think> block visibility",
         "  /end                         End session and exit",
     ]
     .join("\n")
+}
+
+fn think_command(agent: &mut Agent) -> String {
+    let new_state = !agent.show_thinking();
+    agent.set_show_thinking(new_state);
+    if new_state {
+        "thinking blocks: visible".to_string()
+    } else {
+        "thinking blocks: hidden".to_string()
+    }
 }
 
 fn stats_text(agent: &Agent, usage: &TokenUsage) -> String {
