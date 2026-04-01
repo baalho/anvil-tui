@@ -193,8 +193,8 @@ fn cmd_init(workspace: &Path) -> Result<()> {
     println!("    anvil run -p \"hello world\"     quick one-shot");
     println!();
     println!("  Fun mode for kids:");
-    println!("    Type /persona sparkle for Sparkle the Coding Unicorn 🦄");
-    println!("    Type /skill kids-first-program to learn coding step by step");
+    println!("    Type /persona sparkle — activates Sparkle + kids mode automatically!");
+    println!("    Then just tell Sparkle what you like and watch the magic happen 🦄");
     Ok(())
 }
 

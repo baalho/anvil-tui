@@ -29,12 +29,13 @@ cargo doc --no-deps
 crates/
   anvil-config/   # Settings, harness, model profiles
   anvil-llm/      # OpenAI-compatible HTTP client, SSE streaming
-  anvil-tools/    # 7 built-in tools, plugins, hooks, permissions
-  anvil-agent/    # Agent loop, skills, sessions, thinking filter
+  anvil-tools/    # 11 built-in tools, plugins, hooks, permissions
+  anvil-mcp/      # MCP (Model Context Protocol) client
+  anvil-agent/    # Agent loop, skills, sessions, personas, achievements
   anvil/          # CLI binary, interactive mode, slash commands
 ```
 
-Dependencies flow: `anvil-config` → `anvil-llm` / `anvil-tools` → `anvil-agent` → `anvil`.
+Dependencies flow: `anvil-config` → `anvil-llm` / `anvil-tools` / `anvil-mcp` → `anvil-agent` → `anvil`.
 
 ## Adding a Tool
 

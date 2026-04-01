@@ -5,96 +5,53 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-## [v1.0.0] — TBD
+## [v1.1.0] — 2025-04-01
 
 ### Added
-- Soak test validation for daily-driver readiness
-- Config migration from older versions
-- Offline documentation bundled with binary
-
-## [v0.9.0] — TBD
-
-### Added
-- `CONTRIBUTING.md` with build setup and PR process
-- Issue templates for bugs and feature requests
-- PR template with checklist
-- `CHANGELOG.md` in Keep a Changelog format
-- `scripts/install.sh` for macOS and Linux
-
-## [v0.8.0] — TBD
-
-### Added
-- CI on Linux (Ubuntu), macOS ARM (macos-14), and Windows
-- Release workflow triggered by git tags
-- Release artifacts for all three platforms
+- MCP (Model Context Protocol) client — connect to external tool servers
+- Git tools: `git_status`, `git_diff`, `git_log`, `git_commit`
+- Character personas: Sparkle the Unicorn, Bolt the Robot, Captain Codebeard
+- Achievement system with session tracking and unlock notifications
+- Project memory (`.anvil/memory/*.md`) with categories and search
+- Kids skills: first-program, storytelling, game-maker
+- Model profiles for Qwen 2.5, Qwen 3.5, Nemotron Cascade 2
+- Interactive model picker (`/model` shows numbered list)
+- Model discovery at startup (shows available models)
+- Decoupled async TUI architecture (`--tui` flag)
+- Universal `DynTool` trait for extensible tool system
+- STEM-ready structured output types (geometry, physics, charts)
+- KV-cache-friendly layered system prompt construction
+- Fun first-run onboarding with persona suggestions
 
 ### Changed
-- CI uses `macos-14` (ARM) instead of `macos-latest` (Intel)
+- Version bumped to 1.1.0 across all 6 crates
+- System prompt reordered for KV cache efficiency
+- Plugin name validation includes git tools
 
-## [v0.7.0] — TBD
-
-### Added
-- File content cache in `ToolExecutor` (avoids redundant reads)
-- Cache invalidation on `file_write` and `file_edit`
-- `ToolOutputDelta` agent event for streaming tool output
-- Release profile: `lto = true`, `strip = true`, `codegen-units = 1`, `opt-level = "z"`
-
-## [v0.6.0] — TBD
+## [v1.0.0] — 2025-03-31
 
 ### Added
-- Custom tool plugins via `.anvil/tools/*.toml`
-- Template variable substitution (`{{arg_name}}`) in plugin commands
-- Boolean conditional blocks (`{{#flag}}text{{/flag}}`)
-- Skill dependency resolution (`depends: [docker]` in frontmatter)
-- Transitive dependency resolution with circular dependency detection
-- Hook system: `pre-shell.sh`, `post-edit.sh` scripts in `.anvil/hooks/`
-- Configurable `block_on_failure` for hooks
-
-## [v0.5.0] — TBD
-
-### Added
-- `StreamEvent::Error` for mid-stream backend disconnection notification
-- Input validation layer in `ToolExecutor` with actionable error messages
-- SIGTERM → SIGKILL timeout escalation for shell commands (Unix)
-- Partial output capture on shell timeout
-
-### Changed
-- Shell timeout returns `Ok` with error message (not `Err`) so LLM can self-correct
-
-## [v0.4.0] — TBD
-
-### Added
-- Model routing: `/route shell qwen3:8b` sends tool calls to specific models
-- `ModelRouter` with per-tool and wildcard (`*`) routes
-- Parallel tool execution: read-only tools run concurrently via `tokio::spawn`
-- `ToolExecutor` is now `Clone` (uses `Arc<PermissionHandler>`)
-- Per-session cost tracking persisted in SQLite
-- Enhanced `/stats`: shows routes, thinking mode, request count, local cost indicator
-
-## [v0.3.0] — TBD
-
-### Added
+- Ctrl+C cancellation via `CancellationToken`
+- `ThinkingFilter` for `<think>` block parsing
+- Context compaction and auto-compaction
+- Interactive Ralph Loop (`/ralph --verify`)
+- Backend lifecycle management (`/backend start/stop`)
+- Model switching with profile auto-apply
 - Sliding window context management
-- Full-text session search via FTS5 (`anvil history --search`)
-- Project memory (`.anvil/memory/*.md`) injected into system prompt
-- `/memory add` and `/memory clear` commands
-
-## [v0.2.0] — TBD
-
-### Added
-- Interactive Ralph Loop (`/ralph --verify "cmd" --max-iterations N`)
-- Backend lifecycle management (`/backend start`, `/backend stop`)
-- Model switching with profile auto-apply (`/model qwen3:8b`)
-- `/think` command to toggle thinking block visibility
-
-## [v0.1.1] — TBD
-
-### Added
-- Ctrl+C cancellation of in-flight LLM requests via `CancellationToken`
-- `ThinkingFilter` state machine for `<think>` block parsing
-- Context compaction via LLM-based summarization (`/compact`)
-- Auto-compaction when context exceeds configurable threshold
-- `AgentEvent::ThinkingDelta`, `Cancelled`, `AutoCompacted` variants
+- Full-text session search via FTS5
+- Model routing (`/route shell qwen3:8b`)
+- Parallel tool execution for read-only tools
+- Per-session cost tracking
+- Custom tool plugins via `.anvil/tools/*.toml`
+- Skill dependency resolution with cycle detection
+- Hook system (`pre-shell.sh`, `post-edit.sh`)
+- Input validation with actionable error messages
+- SIGTERM → SIGKILL timeout escalation
+- File content cache in `ToolExecutor`
+- Streaming tool output
+- Release profile optimizations (LTO, strip)
+- CI on Linux, macOS ARM, Windows/WSL
+- Install script for macOS and Linux
 
 ## [v0.1.0] — 2025-03-30
 

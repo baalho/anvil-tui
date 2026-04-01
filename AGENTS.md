@@ -135,7 +135,10 @@ Created by `anvil init`. Never committed to git (in `.gitignore`).
 - File cache with invalidation on write/edit
 - Loop detection (hash-based, configurable limit)
 - Output truncation (tail-truncation by lines/bytes, temp file fallback)
-- 228 tests, 0 clippy warnings, 0 doc warnings
+- Decoupled async TUI architecture (`--tui` flag) with input/engine/render tasks
+- Universal `DynTool` trait for extensible tool system with STEM-ready structured output
+- KV-cache-friendly layered system prompt (static → semi-static → dynamic)
+- 246 tests, 0 clippy warnings, 0 doc warnings
 
 ### What's deferred
 
@@ -147,8 +150,7 @@ Created by `anvil init`. Never committed to git (in `.gitignore`).
 1. Ollama defaults to 2048 context tokens — set `OLLAMA_NUM_CTX` or use a
    model profile with `context.default_window`
 2. MLX server tool calling varies by model — some models don't support it
-3. Qwen3/DeepSeek-R1 `<think>` blocks appear in raw output (not parsed/hidden)
-4. GLM-4.7-Flash has chat template bugs on Ollama — use llama-server with `--jinja`
+3. GLM-4.7-Flash has chat template bugs on Ollama — use llama-server with `--jinja`
 
 ---
 
@@ -195,7 +197,7 @@ Examples from history:
 
 - One primary type per module (e.g., `client.rs` → `LlmClient`)
 - Re-export public API from `lib.rs`
-- Keep modules under 500 lines when possible (largest: `bundled_skills.rs` at 690)
+- Keep modules under 500 lines when possible (largest: `bundled_skills.rs`)
 - Tests go in the same file for unit tests, `tests/` directory for integration tests
 
 ---
@@ -207,7 +209,7 @@ Examples from history:
 ```bash
 cargo build                          # debug build (~3s)
 cargo build --release                # release build (~9s, 13MB binary)
-cargo test                           # all 228 tests (~7s)
+cargo test                           # all 246 tests (~7s)
 cargo clippy --all-targets -- -D warnings
 cargo doc --no-deps                  # generate docs (zero warnings)
 ```
@@ -324,13 +326,7 @@ Before making any change, ask yourself:
 
 ---
 
-## 8. Project Plan
-
-See [AGILE.md](AGILE.md) for the feature roadmap.
-
----
-
-## 9. Documentation
+## 8. Documentation
 
 API documentation is generated from code comments via `cargo doc`:
 
@@ -347,7 +343,7 @@ The codebase produces zero doc warnings with `cargo doc --no-deps`.
 
 ---
 
-## 10. Key Files Reference
+## 9. Key Files Reference
 
 | File | What it does |
 |------|-------------|
@@ -370,9 +366,10 @@ The codebase produces zero doc warnings with `cargo doc --no-deps`.
 | `crates/anvil-llm/src/stream.rs` | SSE parsing, ToolCallAccumulator |
 | `crates/anvil-mcp/src/manager.rs` | MCP server manager — spawn, discover, dispatch, shutdown |
 | `crates/anvil-tools/src/tools.rs` | 11 tool implementations (shell, file_read, git_status, etc.) |
+| `crates/anvil-tools/src/tool_trait.rs` | Universal `DynTool` trait, `ToolRegistry`, STEM output types |
 | `crates/anvil-tools/src/executor.rs` | Tool dispatch, validation, env passthrough |
 | `crates/anvil-tools/src/plugins.rs` | User-defined tools via TOML plugin files |
 | `crates/anvil-tools/src/hooks.rs` | Pre/post tool execution hooks |
-| `LESSONS_LEARNED.md` | What worked, what didn't, patterns to reuse |
+| `crates/anvil/src/app.rs` | Decoupled async TUI (input/engine/render tasks) |
 | `MANUAL.md` | User-facing usage guide |
-| `AGILE.md` | Feature roadmap |
+| `CHANGELOG.md` | Version history |

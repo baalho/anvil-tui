@@ -261,6 +261,11 @@ async fn mcp_command(agent: &Agent, arg: &str) -> String {
 }
 
 /// Handle `/persona` — list, activate, or deactivate character personas.
+///
+/// When a persona is activated, auto-activates the `kids-first` skill
+/// so the agent immediately behaves in a kid-friendly way. Mentions
+/// the other kids skills (`kids-story`, `kids-game`) so the user knows
+/// they exist.
 fn persona_command(agent: &mut Agent, arg: &str) -> String {
     if arg.is_empty() {
         let personas = anvil_agent::builtin_personas();
@@ -280,7 +285,8 @@ fn persona_command(agent: &mut Agent, arg: &str) -> String {
 
     if arg == "clear" {
         agent.set_persona(None);
-        return "persona deactivated".to_string();
+        agent.clear_skills();
+        return "persona and skills deactivated".to_string();
     }
 
     match anvil_agent::find_persona(arg) {
@@ -288,7 +294,19 @@ fn persona_command(agent: &mut Agent, arg: &str) -> String {
             let greeting = persona.greeting.clone();
             let name = persona.name.clone();
             agent.set_persona(Some(persona));
-            format!("{name} activated!\n\n{greeting}")
+
+            // Auto-activate kids-first skill for immediate fun
+            let mut skill_note = String::new();
+            let loader = SkillLoader::new(agent.workspace());
+            if let Ok(skill) = loader.get("kids-first") {
+                agent.activate_skill(skill);
+                skill_note = "\n\n  ready to make cool stuff! just say what you like.\
+                     \n  try: /skill kids-story  (story mode)\
+                     \n       /skill kids-game   (build a game)"
+                    .to_string();
+            }
+
+            format!("{name} activated!\n\n{greeting}{skill_note}")
         }
         None => {
             let available: Vec<String> = anvil_agent::builtin_personas()

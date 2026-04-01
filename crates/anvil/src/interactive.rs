@@ -581,14 +581,16 @@ fn print_first_run_welcome() {
     println!("│  Anvil is your coding buddy that runs right      │");
     println!("│  on your computer. No internet needed!           │");
     println!("│                                                  │");
-    println!("│  Want to make it more fun? Try a character:      │");
+    println!("│  Pick a character to get started:                │");
     println!("│                                                  │");
     println!("│    /persona sparkle   🦄 Sparkle the Unicorn     │");
     println!("│    /persona bolt      🤖 Bolt the Robot          │");
     println!("│    /persona codebeard 🏴‍☠️  Captain Codebeard      │");
     println!("│                                                  │");
-    println!("│  Or just start typing to ask me anything!        │");
-    println!("│  Try: \"help me write my first program\"           │");
+    println!("│  Then just say what you like — cats, space,      │");
+    println!("│  dragons — and watch something cool happen!      │");
+    println!("│                                                  │");
+    println!("│  Or just start typing to ask me anything.        │");
     println!("╰─────────────────────────────────────────────────╯");
     println!();
 }

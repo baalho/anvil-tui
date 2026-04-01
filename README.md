@@ -63,7 +63,7 @@ Auto-applied when the model name matches. All fit on 64GB Apple Silicon.
 | Infrastructure | docker, docker-compose, server-admin, grafana, prometheus |
 | Dev Tools | nvim, zellij, fish, git-workflow |
 | Meta | verify-all, verify-shell, verify-files, learn-anvil, learn-rust |
-| Kids | kids-first-program, kids-storytelling, kids-game-maker |
+| Kids | kids-first, kids-story, kids-game |
 
 Skills support YAML frontmatter for metadata, env passthrough, and
 verification commands. Write your own in `.anvil/skills/`.
@@ -144,8 +144,7 @@ servers = []
 ## Documentation
 
 - [MANUAL.md](MANUAL.md) — full usage guide, architecture, how-tos
-- [LESSONS_LEARNED.md](LESSONS_LEARNED.md) — what worked, what didn't, patterns to reuse
-- [AGILE.md](AGILE.md) — feature roadmap
+- [CHANGELOG.md](CHANGELOG.md) — version history
 
 ## Project Structure
 
