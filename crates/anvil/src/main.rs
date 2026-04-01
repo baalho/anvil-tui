@@ -1,3 +1,4 @@
+pub mod app;
 mod backend;
 mod commands;
 mod interactive;
@@ -29,6 +30,10 @@ struct Cli {
     /// Resume the most recent session, or a specific session by ID prefix
     #[arg(short = 'c', long = "continue")]
     continue_session: Option<Option<String>>,
+
+    /// Use the decoupled async TUI (60fps, non-blocking)
+    #[arg(long = "tui")]
+    decoupled_tui: bool,
 }
 
 #[derive(Subcommand)]
@@ -146,7 +151,11 @@ async fn main() -> Result<()> {
                 agent.apply_model_profile(profile);
             }
 
-            interactive::run_interactive(agent, summary).await
+            if cli.decoupled_tui {
+                app::run_decoupled(agent, summary).await
+            } else {
+                interactive::run_interactive(agent, summary).await
+            }
         }
     }
 }

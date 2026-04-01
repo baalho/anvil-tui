@@ -26,3 +26,6 @@ tracing-subscriber = { workspace = true }
 ctrlc = "3.5.2"
 reqwest.workspace = true
 tokio-util.workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }

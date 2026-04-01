@@ -362,6 +362,58 @@ notes = "Reasoning model — outputs <think> blocks before answering. MIT licens
 "#,
     ),
     (
+        "qwen3.5.toml",
+        r#"# Qwen3.5 — Alibaba's hybrid reasoning model family (Jul 2025)
+# Source: https://unsloth.ai/docs/models/qwen3.5
+# Sizes: 0.8B, 2B, 4B, 9B, 27B, 35B-A3B (MoE), 122B-A10B, 397B-A17B.
+# 256K native context, 201 languages, thinking + non-thinking modes.
+# 35B-A3B (22GB Q4) and 27B (17GB Q4) fit 64GB M4 Max.
+# NOTE: Currently no Ollama GGUF support — use llama-server with --jinja.
+
+name = "Qwen3.5"
+match_patterns = ["qwen3.5"]
+
+[sampling]
+temperature = 0.6
+top_p = 0.95
+top_k = 20
+repeat_penalty = 1.0
+
+[context]
+max_window = 262144
+default_window = 32768
+
+[backend]
+preferred = "llama-server"
+flags = ["--jinja"]
+notes = "No Ollama GGUF support yet (mmproj vision files). Use llama-server with --jinja."
+"#,
+    ),
+    (
+        "nemotron-cascade-2.toml",
+        r#"# Nemotron Cascade 2 — NVIDIA's 30B MoE reasoning + agentic model (Jul 2025)
+# Source: https://ollama.com/library/nemotron-cascade-2
+# 30B total, 3B active (MoE). 256K context. 24GB on disk.
+# Gold medal IMO + IOI performance. Thinking + instruct modes.
+# Supports tool calling. Fits on 64GB M4 Max.
+
+name = "Nemotron-Cascade-2"
+match_patterns = ["nemotron-cascade", "nemotron_cascade"]
+
+[sampling]
+temperature = 0.6
+top_p = 0.95
+
+[context]
+max_window = 262144
+default_window = 32768
+
+[backend]
+preferred = "ollama"
+notes = "Supports thinking mode and tool calling. Strong reasoning and agentic capabilities."
+"#,
+    ),
+    (
         "glm-4.7-flash.toml",
         r#"# GLM-4.7-Flash — Z.ai's 30B MoE reasoning model
 # Source: https://unsloth.ai/docs/models/glm-4.7-flash
@@ -470,6 +522,16 @@ mod tests {
         let matched = find_matching_profile(&profiles, "qwen2.5:7b");
         assert!(matched.is_some());
         assert_eq!(matched.unwrap().name, "Qwen2.5");
+
+        // Qwen3.5
+        let matched = find_matching_profile(&profiles, "qwen3.5-35b-a3b:latest");
+        assert!(matched.is_some());
+        assert_eq!(matched.unwrap().name, "Qwen3.5");
+
+        // Nemotron Cascade 2
+        let matched = find_matching_profile(&profiles, "nemotron-cascade-2:latest");
+        assert!(matched.is_some());
+        assert_eq!(matched.unwrap().name, "Nemotron-Cascade-2");
 
         assert!(find_matching_profile(&profiles, "unknown-model-xyz").is_none());
     }
