@@ -20,7 +20,17 @@ struct CtrlCState {
 }
 
 pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> Result<()> {
+    // Detect first run — no .anvil/ directory means brand new user
+    let is_first_run = !agent.workspace().join(".anvil").exists();
+
     print_banner(&agent);
+
+    // Show available models hint (async discovery)
+    print_model_hint(&agent).await;
+
+    if is_first_run {
+        print_first_run_welcome();
+    }
 
     if let Some(summary) = session_summary {
         println!("{summary}");
@@ -477,13 +487,109 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
 }
 
 fn print_banner(agent: &Agent) {
-    println!("╭─────────────────────────────────────╮");
-    println!("│  Anvil — local coding agent         │");
-    println!("╰─────────────────────────────────────╯");
-    println!("  model:   {}", agent.model());
-    println!("  session: {}", &agent.session_id()[..8]);
-    println!("  cwd:     {}", agent.workspace().display());
-    println!("  type /help for commands");
+    if let Some(persona) = agent.persona() {
+        // Persona-themed banner
+        let (border, icon) = match persona.key.as_str() {
+            "sparkle" => ("✨", "🦄"),
+            "bolt" => ("⚡", "🤖"),
+            "codebeard" => ("⚓", "🏴‍☠️"),
+            _ => ("─", "🔨"),
+        };
+        println!(
+            "{border}{border}{border} {icon} {} {border}{border}{border}",
+            persona.name
+        );
+        println!();
+        println!("  {}", persona.greeting);
+        println!();
+        println!("  model:   {}", agent.model());
+        println!("  session: {}", &agent.session_id()[..8]);
+        println!("  type /help for commands");
+        println!();
+    } else {
+        println!("╭─────────────────────────────────────╮");
+        println!("│  ⚒  Anvil v{:<25}│", env!("CARGO_PKG_VERSION"));
+        println!("│  local coding agent                 │");
+        println!("╰─────────────────────────────────────╯");
+        println!("  model:   {}", agent.model());
+        println!("  session: {}", &agent.session_id()[..8]);
+        println!("  cwd:     {}", agent.workspace().display());
+        println!("  type /help for commands");
+        println!();
+    }
+}
+
+/// Show a hint about available models at startup.
+/// Queries the backend and shows count + /model tip if multiple models exist.
+async fn print_model_hint(agent: &Agent) {
+    use anvil_config::BackendKind;
+
+    let base = agent.base_url().trim_end_matches("/v1");
+    let models: Option<Vec<String>> = match agent.backend() {
+        BackendKind::Ollama => {
+            let url = format!("{base}/api/tags");
+            if let Ok(resp) = reqwest::get(&url).await {
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    body["models"].as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|m| m["name"].as_str().map(String::from))
+                            .collect()
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        BackendKind::LlamaServer | BackendKind::Mlx => {
+            let url = format!("{}/models", agent.base_url().trim_end_matches('/'));
+            if let Ok(resp) = reqwest::get(&url).await {
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    body["data"].as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|m| m["id"].as_str().map(String::from))
+                            .collect()
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        BackendKind::Custom => None,
+    };
+
+    if let Some(models) = models {
+        if models.len() > 1 {
+            println!(
+                "  models:  {} available — type /model to pick one",
+                models.len()
+            );
+            println!();
+        }
+    }
+}
+
+/// First-run welcome for new users. Detects if this is the first session
+/// and offers a friendly introduction with persona selection.
+fn print_first_run_welcome() {
+    println!("╭─────────────────────────────────────────────────╮");
+    println!("│  🎉  Welcome to Anvil!                          │");
+    println!("│                                                  │");
+    println!("│  Anvil is your coding buddy that runs right      │");
+    println!("│  on your computer. No internet needed!           │");
+    println!("│                                                  │");
+    println!("│  Want to make it more fun? Try a character:      │");
+    println!("│                                                  │");
+    println!("│    /persona sparkle   🦄 Sparkle the Unicorn     │");
+    println!("│    /persona bolt      🤖 Bolt the Robot          │");
+    println!("│    /persona codebeard 🏴‍☠️  Captain Codebeard      │");
+    println!("│                                                  │");
+    println!("│  Or just start typing to ask me anything!        │");
+    println!("│  Try: \"help me write my first program\"           │");
+    println!("╰─────────────────────────────────────────────────╯");
     println!();
 }
 

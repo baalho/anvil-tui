@@ -169,7 +169,23 @@ fn cmd_help(topic: &str) -> Result<()> {
 
 fn cmd_init(workspace: &Path) -> Result<()> {
     let harness = anvil_config::init_harness(workspace)?;
-    println!("initialized {}", harness.display());
+    println!("⚒  Anvil initialized!");
+    println!();
+    println!("  created: {}", harness.display());
+    println!();
+    println!("  What's inside:");
+    println!("    config.toml   — backend & model settings");
+    println!("    models/       — per-model sampling profiles");
+    println!("    skills/       — 17 prompt templates (including 3 for kids!)");
+    println!("    memory/       — your learned patterns (starts empty)");
+    println!();
+    println!("  Next steps:");
+    println!("    anvil                          start coding!");
+    println!("    anvil run -p \"hello world\"     quick one-shot");
+    println!();
+    println!("  Fun mode for kids:");
+    println!("    Type /persona sparkle for Sparkle the Coding Unicorn 🦄");
+    println!("    Type /skill kids-first-program to learn coding step by step");
     Ok(())
 }
 

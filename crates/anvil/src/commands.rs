@@ -361,40 +361,62 @@ fn stats_text(agent: &Agent, usage: &TokenUsage) -> String {
 }
 
 async fn model_command(agent: &mut Agent, arg: &str) -> String {
+    let profiles = anvil_config::load_bundled_profiles();
+
     if arg.is_empty() {
-        let mut info = format!("model:   {}", agent.model());
-        // Show active profile info
-        let profiles = anvil_config::load_bundled_profiles();
+        // Show current model info + numbered list of available models
+        let mut info = format!("current: {} *\n", agent.model());
+
+        // Show profile info for current model
         if let Some(profile) = anvil_config::find_matching_profile(&profiles, agent.model()) {
-            info.push_str(&format!("\nprofile: {}", profile.name));
+            info.push_str(&format!("profile: {}", profile.name));
             if let Some(t) = profile.sampling.temperature {
-                info.push_str(&format!("\n  temperature:    {t}"));
+                info.push_str(&format!(" (temp={t}"));
             }
             if let Some(p) = profile.sampling.top_p {
-                info.push_str(&format!("\n  top_p:          {p}"));
-            }
-            if let Some(p) = profile.sampling.min_p {
-                info.push_str(&format!("\n  min_p:          {p}"));
-            }
-            if let Some(r) = profile.sampling.repeat_penalty {
-                info.push_str(&format!("\n  repeat_penalty: {r}"));
+                info.push_str(&format!(", top_p={p}"));
             }
             if profile.context.default_window > 0 {
-                info.push_str(&format!(
-                    "\n  context_window: {}",
-                    profile.context.default_window
-                ));
+                info.push_str(&format!(", ctx={}", profile.context.default_window));
             }
+            info.push(')');
         } else {
-            info.push_str("\nprofile: (none)");
+            info.push_str("profile: (none)");
         }
+
+        // Discover and list available models
+        let models = discover_models(agent).await;
+        if !models.is_empty() {
+            info.push_str("\n\navailable models:");
+            for (i, model) in models.iter().enumerate() {
+                let marker = if *model == agent.model() { " *" } else { "" };
+                let profile_tag =
+                    if let Some(p) = anvil_config::find_matching_profile(&profiles, model) {
+                        format!("  ({})", p.name)
+                    } else {
+                        String::new()
+                    };
+                info.push_str(&format!("\n  {:>2}. {model}{marker}{profile_tag}", i + 1));
+            }
+            info.push_str("\n\nusage: /model <name> or /model <number>");
+        }
+
         return info;
     }
 
-    // Discover available models based on backend type
+    // Discover available models
     let models = discover_models(agent).await;
 
-    let model_name = if models.is_empty() {
+    // Check if arg is a number (picker selection)
+    let model_name = if let Ok(num) = arg.parse::<usize>() {
+        if !models.is_empty() && num >= 1 && num <= models.len() {
+            models[num - 1].clone()
+        } else if models.is_empty() {
+            return "can't pick by number — backend unreachable. use /model <name>".to_string();
+        } else {
+            return format!("invalid number. pick 1-{}", models.len());
+        }
+    } else if models.is_empty() {
         // Can't discover — just set the model directly
         arg.to_string()
     } else if models
@@ -411,14 +433,22 @@ async fn model_command(agent: &mut Agent, arg: &str) -> String {
                 .unwrap_or_else(|| arg.to_string())
         }
     } else {
-        let available = models.join(", ");
-        return format!("model '{arg}' not found. available: {available}");
+        // Try fuzzy match — case-insensitive substring
+        let arg_lower = arg.to_lowercase();
+        if let Some(matched) = models
+            .iter()
+            .find(|m| m.to_lowercase().contains(&arg_lower))
+        {
+            matched.clone()
+        } else {
+            let available = models.join(", ");
+            return format!("model '{arg}' not found. available: {available}");
+        }
     };
 
     agent.set_model(model_name.clone());
 
     // Apply matching model profile
-    let profiles = anvil_config::load_bundled_profiles();
     let mut result = format!("switched to model: {model_name}");
     if let Some(profile) = anvil_config::find_matching_profile(&profiles, &model_name) {
         agent.apply_model_profile(profile);

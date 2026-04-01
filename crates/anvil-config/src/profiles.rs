@@ -269,6 +269,52 @@ preferred = "ollama"
 "#,
     ),
     (
+        "qwen2.5-coder.toml",
+        r#"# Qwen2.5-Coder — Alibaba's coding model (Nov 2024)
+# Source: https://qwenlm.github.io/blog/qwen2.5-coder-family/
+# Available 0.5B, 1.5B, 3B, 7B, 14B, 32B. 128K native context.
+# Good tool calling support. 32B (20GB) fits 64GB M4 Max.
+# Lower temperature than Qwen3 for more deterministic file generation.
+
+name = "Qwen2.5-Coder"
+match_patterns = ["qwen2.5-coder", "Qwen2.5-Coder"]
+
+[sampling]
+temperature = 0.3
+top_p = 0.9
+
+[context]
+max_window = 131072
+default_window = 16384
+
+[backend]
+preferred = "ollama"
+notes = "Use temperature 0.3 for reliable tool calling and file generation."
+"#,
+    ),
+    (
+        "qwen2.5.toml",
+        r#"# Qwen2.5 — Alibaba's general-purpose model family (Sep 2024)
+# Source: https://qwenlm.github.io/blog/qwen2.5/
+# Available 0.5B to 72B. 128K native context.
+# Supports tool calling. 32B (20GB) fits 64GB M4 Max.
+
+name = "Qwen2.5"
+match_patterns = ["qwen2.5:", "qwen2.5-"]
+
+[sampling]
+temperature = 0.5
+top_p = 0.9
+
+[context]
+max_window = 131072
+default_window = 16384
+
+[backend]
+preferred = "ollama"
+"#,
+    ),
+    (
         "devstral.toml",
         r#"# Devstral 24B — Mistral x All Hands AI coding agent model
 # Source: https://mistral.ai/news/devstral
@@ -415,6 +461,15 @@ mod tests {
             .iter()
             .map(|(_, content)| toml::from_str::<ModelProfile>(content).unwrap())
             .collect::<Vec<_>>();
+
+        // Qwen2.5 family
+        let matched = find_matching_profile(&profiles, "qwen2.5-coder:32b");
+        assert!(matched.is_some());
+        assert_eq!(matched.unwrap().name, "Qwen2.5-Coder");
+
+        let matched = find_matching_profile(&profiles, "qwen2.5:7b");
+        assert!(matched.is_some());
+        assert_eq!(matched.unwrap().name, "Qwen2.5");
 
         assert!(find_matching_profile(&profiles, "unknown-model-xyz").is_none());
     }
