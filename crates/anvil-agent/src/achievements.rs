@@ -103,7 +103,7 @@ pub struct UnlockedBadge {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AchievementStore {
     pub unlocked: Vec<UnlockedBadge>,
-    #[serde(skip)]
+    #[serde(skip, default)]
     path: PathBuf,
 }
 
@@ -173,30 +173,40 @@ impl AchievementStore {
 
     /// Format a badge unlock notification, optionally themed by persona.
     pub fn format_unlock(badge: &Badge, persona: Option<&str>) -> String {
-        let themed = match persona {
+        Self::format_unlock_parts(badge.icon, badge.name, badge.description, persona)
+    }
+
+    /// Format a badge unlock notification from individual parts.
+    /// Useful when the caller has runtime strings instead of a `Badge` reference.
+    pub fn format_unlock_parts(
+        icon: &str,
+        name: &str,
+        description: &str,
+        persona: Option<&str>,
+    ) -> String {
+        match persona {
             Some("sparkle") => format!(
                 "✨ MAGIC ACHIEVEMENT UNLOCKED! ✨\n  {} {} — {}\n  You're amazing!",
-                badge.icon, badge.name, badge.description
+                icon, name, description
             ),
             Some("bolt") => format!(
                 "[BEEP BOOP] ACHIEVEMENT UNLOCKED!\n  {} {} — {}\n  SYSTEMS UPGRADED!",
-                badge.icon, badge.name, badge.description
+                icon, name, description
             ),
             Some("codebeard") => format!(
                 "⚓ TREASURE FOUND! ⚓\n  {} {} — {}\n  Arr, well done matey!",
-                badge.icon, badge.name, badge.description
+                icon, name, description
             ),
             _ => format!(
                 "🏆 Achievement unlocked!\n  {} {} — {}",
-                badge.icon, badge.name, badge.description
+                icon, name, description
             ),
-        };
-        themed
+        }
     }
 }
 
 /// Tracks tool usage within a session for achievement detection.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SessionTracker {
     pub tools_used: HashSet<String>,
     pub files_read: HashSet<String>,

@@ -102,6 +102,14 @@ pub enum AppEvent {
     /// A slash command produced output (handled synchronously).
     CommandOutput(String),
 
+    /// A badge was just unlocked.
+    AchievementUnlocked {
+        icon: String,
+        name: String,
+        description: String,
+        persona: Option<String>,
+    },
+
     /// Engine is shutting down.
     Shutdown,
 }
@@ -198,7 +206,9 @@ pub fn spawn_input_task(
 /// Spawn the engine task.
 ///
 /// Receives commands from the render task, runs agent turns,
-/// and sends events back via `app_tx`.
+/// and sends events back via `app_tx`. Tracks tool usage for
+/// achievement detection and emits `AchievementUnlocked` events
+/// without blocking tool execution.
 pub fn spawn_engine_task(
     mut cmd_rx: mpsc::Receiver<EngineCommand>,
     app_tx: mpsc::Sender<AppEvent>,
@@ -207,8 +217,11 @@ pub fn spawn_engine_task(
 ) -> tokio::task::JoinHandle<anvil_agent::Agent> {
     tokio::spawn(async move {
         use anvil_agent::AgentEvent;
+        use anvil_agent::achievements::{AchievementStore, SessionTracker};
 
         let mut agent = agent;
+        let mut tracker = SessionTracker::new();
+        let mut achievements = AchievementStore::load(agent.workspace());
 
         // Signal ready
         let _ = app_tx.send(AppEvent::Ready).await;
@@ -231,6 +244,10 @@ pub fn spawn_engine_task(
                             let app_tx_clone = app_tx.clone();
 
                             // Spawn a forwarder that converts AgentEvents to AppEvents
+                            // and checks for achievement triggers on tool results.
+                            let mut fwd_tracker = tracker.clone();
+                            let mut fwd_achievements = achievements.clone();
+                            let persona_key = agent.persona().map(|p| p.key.clone());
                             let forwarder = tokio::spawn(async move {
                                 while let Some(event) = event_rx.recv().await {
                                     let app_event = match event {
@@ -240,10 +257,44 @@ pub fn spawn_engine_task(
                                             AppEvent::ToolCallPending { id, name, arguments }
                                         }
                                         AgentEvent::ToolResult { name, result } => {
+                                            // Check achievements — non-blocking fire-and-forget
+                                            let triggers = fwd_tracker.record_tool_call(&name, "{}");
+                                            for key in triggers {
+                                                if let Some(badge) = fwd_achievements.unlock(
+                                                    key,
+                                                    persona_key.as_deref(),
+                                                ) {
+                                                    let _ = app_tx_clone
+                                                        .try_send(AppEvent::AchievementUnlocked {
+                                                            icon: badge.icon.to_string(),
+                                                            name: badge.name.to_string(),
+                                                            description: badge.description.to_string(),
+                                                            persona: persona_key.clone(),
+                                                        });
+                                                }
+                                            }
                                             AppEvent::ToolResult { name, result }
                                         }
                                         AgentEvent::Usage(u) => AppEvent::Usage(u),
-                                        AgentEvent::TurnComplete => AppEvent::TurnComplete,
+                                        AgentEvent::TurnComplete => {
+                                            // Check message-count achievements
+                                            let triggers = fwd_tracker.record_message();
+                                            for key in triggers {
+                                                if let Some(badge) = fwd_achievements.unlock(
+                                                    key,
+                                                    persona_key.as_deref(),
+                                                ) {
+                                                    let _ = app_tx_clone
+                                                        .try_send(AppEvent::AchievementUnlocked {
+                                                            icon: badge.icon.to_string(),
+                                                            name: badge.name.to_string(),
+                                                            description: badge.description.to_string(),
+                                                            persona: persona_key.clone(),
+                                                        });
+                                                }
+                                            }
+                                            AppEvent::TurnComplete
+                                        }
                                         AgentEvent::AutoCompacted {
                                             before_tokens,
                                             after_tokens,
@@ -272,6 +323,8 @@ pub fn spawn_engine_task(
                                         break;
                                     }
                                 }
+                                // Return updated tracker/achievements to sync back
+                                (fwd_tracker, fwd_achievements)
                             });
 
                             // Run the turn
@@ -282,7 +335,10 @@ pub fn spawn_engine_task(
                             // Drop event_tx so the forwarder finishes
                             drop(event_tx);
                             drop(perm_tx_clone);
-                            let _ = forwarder.await;
+                            if let Ok((fwd_t, fwd_a)) = forwarder.await {
+                                tracker = fwd_t;
+                                achievements = fwd_a;
+                            }
 
                             if let Err(e) = result {
                                 let _ = app_tx.send(AppEvent::Error(format!("{e}"))).await;
@@ -570,6 +626,21 @@ pub async fn run_decoupled(
 
             AppEvent::CommandOutput(msg) => {
                 println!("{msg}");
+            }
+
+            AppEvent::AchievementUnlocked {
+                icon,
+                name,
+                description,
+                persona,
+            } => {
+                let msg = anvil_agent::achievements::AchievementStore::format_unlock_parts(
+                    &icon,
+                    &name,
+                    &description,
+                    persona.as_deref(),
+                );
+                println!("\n{msg}\n");
             }
 
             AppEvent::PermissionResponse(_) => {

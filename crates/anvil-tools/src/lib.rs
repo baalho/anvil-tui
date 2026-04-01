@@ -20,6 +20,7 @@ mod executor;
 pub mod hooks;
 mod permission;
 pub mod plugins;
+pub mod tool_trait;
 mod tools;
 mod truncation;
 
@@ -28,4 +29,5 @@ pub use executor::ToolExecutor;
 pub use hooks::HookRunner;
 pub use permission::{PermissionDecision, PermissionHandler};
 pub use plugins::{load_plugins, ToolPlugin};
+pub use tool_trait::{DynTool, ToolAccess, ToolOutput, ToolRegistry};
 pub use truncation::{TruncationConfig, TruncationResult};

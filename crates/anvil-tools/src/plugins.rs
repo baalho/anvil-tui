@@ -196,6 +196,10 @@ pub fn validate_plugin_name(name: &str) -> Result<()> {
         "grep",
         "ls",
         "find",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_commit",
     ];
     if BUILTIN.contains(&name) {
         bail!("plugin name '{name}' conflicts with built-in tool");
@@ -273,6 +277,8 @@ mod tests {
     fn validate_builtin_name_rejected() {
         assert!(validate_plugin_name("shell").is_err());
         assert!(validate_plugin_name("file_read").is_err());
+        assert!(validate_plugin_name("git_status").is_err());
+        assert!(validate_plugin_name("git_commit").is_err());
     }
 
     #[test]
