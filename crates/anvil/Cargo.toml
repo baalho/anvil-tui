@@ -1,6 +1,6 @@
 [package]
 name = "anvil"
-version = "1.1.0"
+version = "1.2.0"
 description = "CLI binary with TUI for the Anvil coding agent"
 edition.workspace = true
 license.workspace = true

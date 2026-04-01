@@ -76,7 +76,10 @@ impl ToolOutput {
                 data,
                 summary,
             } => {
-                format!("[{kind}] {summary}\n\n{}", serde_json::to_string_pretty(data).unwrap_or_default())
+                format!(
+                    "[{kind}] {summary}\n\n{}",
+                    serde_json::to_string_pretty(data).unwrap_or_default()
+                )
             }
             ToolOutput::Error(e) => format!("error: {e}"),
         }
@@ -165,7 +168,10 @@ impl ToolRegistry {
 
     /// Find a tool by name.
     pub fn find(&self, name: &str) -> Option<&dyn DynTool> {
-        self.tools.iter().find(|t| t.name() == name).map(|t| t.as_ref())
+        self.tools
+            .iter()
+            .find(|t| t.name() == name)
+            .map(|t| t.as_ref())
     }
 
     /// Check if a tool is read-only.
@@ -334,7 +340,11 @@ mod tests {
             .await
             .unwrap();
         match result {
-            ToolOutput::Structured { kind, data, summary } => {
+            ToolOutput::Structured {
+                kind,
+                data,
+                summary,
+            } => {
                 assert_eq!(kind, "geometry");
                 assert_eq!(data["link_count"], 4);
                 assert!(summary.contains("4-bar"));

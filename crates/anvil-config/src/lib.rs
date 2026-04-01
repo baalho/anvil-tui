@@ -15,16 +15,19 @@
 //! │   ├── glm-4.7-flash.toml
 //! │   └── qwen3-coder.toml
 //! ├── skills/              # Prompt template skills (Markdown with YAML frontmatter)
-//! └── memory/              # Reserved for future session memory
+//! ├── inventory.toml       # Host/service registry (optional)
+//! └── memory/              # Persistent learned patterns (categorized markdown)
 //! ```
 
 mod bundled_skills;
+pub mod inventory;
 pub mod migration;
 mod profiles;
 mod provider;
 mod settings;
 
 pub use bundled_skills::BUNDLED_SKILLS;
+pub use inventory::{load_inventory, Inventory};
 pub use profiles::{
     find_matching_profile, load_bundled_profiles, load_profiles, profiles_dir, BackendHints,
     ContextConfig, ModelProfile, SamplingConfig, BUNDLED_PROFILES,
@@ -82,7 +85,7 @@ pub fn load_settings(working_dir: &Path) -> Result<Settings> {
 /// - `context.md` — project context template with lessons-learned section
 /// - `models/` — bundled model profiles (Qwen3-Coder, Devstral, DeepSeek-R1, GLM-4.7)
 /// - `skills/` — default verification and learning skills
-/// - `memory/` — reserved for future session memory features
+/// - `memory/` — persistent learned patterns (categorized markdown)
 ///
 /// Existing files are never overwritten — safe to run multiple times.
 pub fn init_harness(dir: &Path) -> Result<PathBuf> {

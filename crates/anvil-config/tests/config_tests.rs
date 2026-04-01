@@ -70,9 +70,13 @@ fn init_harness_creates_bundled_skills() {
 
     let skills_dir = harness.join("skills");
     // Infrastructure
-    assert!(skills_dir.join("docker.md").exists());
-    assert!(skills_dir.join("docker-compose.md").exists());
+    assert!(skills_dir.join("containers.md").exists());
     assert!(skills_dir.join("server-admin.md").exists());
+    assert!(skills_dir.join("sops-age.md").exists());
+    assert!(skills_dir.join("deploy-fish.md").exists());
+    assert!(skills_dir.join("tailscale.md").exists());
+    assert!(skills_dir.join("caddy-cloudflare.md").exists());
+    assert!(skills_dir.join("restic-backup.md").exists());
     assert!(skills_dir.join("grafana.md").exists());
     assert!(skills_dir.join("prometheus.md").exists());
     // Dev tools

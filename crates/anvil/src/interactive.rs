@@ -86,12 +86,49 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         // Reset Ctrl+C state between turns
         ctrlc_state.pending.store(false, Ordering::SeqCst);
 
-        execute!(
-            io::stdout(),
-            SetForegroundColor(Color::Green),
-            Print("you> "),
-            ResetColor,
-        )?;
+        // Show token usage in prompt when context is >50% full
+        let context_window = agent.context_limit() as u64;
+        let used_tokens = cumulative_usage.total_tokens;
+        let usage_pct = if context_window > 0 {
+            (used_tokens * 100) / context_window
+        } else {
+            0
+        };
+
+        if usage_pct > 80 {
+            execute!(
+                io::stdout(),
+                SetForegroundColor(Color::Green),
+                Print("you "),
+                SetForegroundColor(Color::Yellow),
+                Print(format!(
+                    "[{}/{}k ⚠] ",
+                    format_token_count(used_tokens),
+                    context_window / 1000
+                )),
+                SetForegroundColor(Color::Green),
+                Print("▸ "),
+                ResetColor,
+            )?;
+        } else if usage_pct > 50 {
+            execute!(
+                io::stdout(),
+                SetForegroundColor(Color::Green),
+                Print(format!(
+                    "you [{}/{}k] ▸ ",
+                    format_token_count(used_tokens),
+                    context_window / 1000
+                )),
+                ResetColor,
+            )?;
+        } else {
+            execute!(
+                io::stdout(),
+                SetForegroundColor(Color::Green),
+                Print("you▸ "),
+                ResetColor,
+            )?;
+        }
         io::stdout().flush()?;
 
         let input = match read_input(&stdin) {
@@ -288,8 +325,50 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
             (moved_agent, result)
         });
 
+        // Spinner while waiting for first LLM token
+        let spinner_cancel = CancellationToken::new();
+        let spinner_cancel_clone = spinner_cancel.clone();
+        let spinner_handle = tokio::spawn(async move {
+            const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let mut i = 0;
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(80));
+            loop {
+                tokio::select! {
+                    _ = spinner_cancel_clone.cancelled() => break,
+                    _ = interval.tick() => {
+                        let frame = FRAMES[i % FRAMES.len()];
+                        let _ = execute!(
+                            io::stdout(),
+                            crossterm::cursor::MoveToColumn(0),
+                            SetForegroundColor(Color::DarkGrey),
+                            Print(format!("  {frame} thinking...")),
+                            ResetColor,
+                        );
+                        let _ = io::stdout().flush();
+                        i += 1;
+                    }
+                }
+            }
+            // Clear spinner line
+            let _ = execute!(
+                io::stdout(),
+                crossterm::cursor::MoveToColumn(0),
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
+            );
+        });
+
         let mut needs_newline = false;
+        let mut spinner_stopped = false;
+        let mut spinner_handle = Some(spinner_handle);
         while let Some(event) = event_rx.recv().await {
+            // Stop spinner on first event
+            if !spinner_stopped {
+                spinner_cancel.cancel();
+                if let Some(handle) = spinner_handle.take() {
+                    let _ = handle.await;
+                }
+                spinner_stopped = true;
+            }
             match event {
                 AgentEvent::ThinkingDelta(text) => {
                     if !needs_newline {
@@ -329,11 +408,14 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         println!();
                         needs_newline = false;
                     }
+                    let icon = tool_icon(&name);
                     let short_args = truncate_display(&arguments, 80);
                     execute!(
                         io::stdout(),
-                        SetForegroundColor(Color::Yellow),
-                        Print(format!("  [tool: {name}({short_args})]\n")),
+                        SetForegroundColor(Color::Cyan),
+                        Print(format!("  {icon} {name}")),
+                        SetForegroundColor(Color::DarkGrey),
+                        Print(format!(" ─ {short_args}\n")),
                         ResetColor,
                     )?;
 
@@ -341,12 +423,13 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                     let _ = perm_tx.send(decision).await;
                 }
                 AgentEvent::ToolResult { name, result } => {
+                    let icon = tool_icon(&name);
                     let lines = result.lines().count();
                     let chars = result.len();
                     execute!(
                         io::stdout(),
                         SetForegroundColor(Color::DarkGrey),
-                        Print(format!("  [{name}: {lines} lines, {chars} chars]\n")),
+                        Print(format!("  {icon} {name}: {lines} lines, {chars} chars\n")),
                         ResetColor,
                     )?;
                 }
@@ -671,6 +754,30 @@ fn prompt_permission(tool_name: &str, arguments: &str) -> Result<PermissionDecis
     println!("{label}");
 
     Ok(decision)
+}
+
+/// Format token count for compact display (e.g., 1234 → "1.2k", 500 → "500").
+fn format_token_count(tokens: u64) -> String {
+    if tokens >= 1000 {
+        format!("{:.1}k", tokens as f64 / 1000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+/// Map tool names to display icons for terminal output.
+fn tool_icon(name: &str) -> &'static str {
+    match name {
+        "shell" => "⚙",
+        "file_read" => "📄",
+        "file_write" => "📝",
+        "file_edit" => "✏",
+        "grep" => "🔍",
+        "find" => "🔍",
+        "ls" => "📂",
+        "git_status" | "git_diff" | "git_log" | "git_commit" => "📊",
+        _ => "🔧", // MCP or plugin tools
+    }
 }
 
 fn truncate_display(s: &str, max: usize) -> String {

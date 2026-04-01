@@ -5,6 +5,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [v1.2.0] — 2026-04-02
+
+### Added
+- 6 new infrastructure skills: containers (unified Docker/Podman), sops-age, deploy-fish, tailscale, caddy-cloudflare, restic-backup
+- Homelab persona (`/persona homelab`) with auto-activated infrastructure skills
+- Host inventory system (`.anvil/inventory.toml`) — injected into system prompt
+- Spinner animation during LLM response wait
+- Categorized `/help` output with colored headers
+- Colored tool output headers with per-tool icons
+- Token usage display in input prompt (>50% context)
+
+### Changed
+- Unified `containers` skill replaces separate `docker` and `docker-compose` skills (21 total, was 17)
+- AGENTS.md rewritten for token efficiency (~1090 tokens, was ~2957 — 63% reduction)
+- Server-admin skill updated with Tailscale SSH and Podman service management
+- All documentation updated with correct dependency graph, skill counts, and inventory docs
+- Removed all hardware-specific references from docs and code
+- Version bumped to 1.2.0 across all 6 crates
+
+### Fixed
+- AGENTS.md incorrectly stated anvil-mcp depends on anvil-config (it has no internal deps)
+- MANUAL.md described memory/ as "reserved for future use" (fully implemented)
+- MANUAL.md incorrectly stated anvil-tools has no internal dependencies (depends on anvil-config)
+
 ## [v1.1.0] — 2025-04-01
 
 ### Added

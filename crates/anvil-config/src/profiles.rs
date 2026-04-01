@@ -334,7 +334,7 @@ default_window = 16384
 
 [backend]
 preferred = "ollama"
-notes = "Apache 2.0 license. Runs on 32GB+ RAM."
+notes = "Apache 2.0 license. Use llama-server with --jinja for best results."
 "#,
     ),
     (

@@ -97,6 +97,14 @@ pub fn build_system_prompt(
         }
     }
 
+    // --- Layer 4b: Infrastructure inventory (semi-static) ---
+    // Loaded from .anvil/inventory.toml. Changes rarely (when hosts are added/removed).
+    let inventory = anvil_config::load_inventory(workspace);
+    if let Some(inv_section) = anvil_config::inventory::inventory_as_prompt(&inventory) {
+        prompt.push('\n');
+        prompt.push_str(&inv_section);
+    }
+
     // --- Layer 5: Dynamic content (changes every turn) ---
     // Environment info and memory go last so the prefix above stays stable.
     prompt.push_str("\n## Environment\n");
@@ -227,9 +235,15 @@ mod tests {
         let context_pos = prompt.find("Project context here").unwrap();
         let env_pos = prompt.find("## Environment").unwrap();
 
-        assert!(base_pos < skill_pos, "base prompt should come before skills");
+        assert!(
+            base_pos < skill_pos,
+            "base prompt should come before skills"
+        );
         assert!(skill_pos < context_pos, "skills should come before context");
-        assert!(context_pos < env_pos, "context should come before environment");
+        assert!(
+            context_pos < env_pos,
+            "context should come before environment"
+        );
     }
 
     #[test]

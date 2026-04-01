@@ -8,9 +8,13 @@
 /// All bundled skills, written to `.anvil/skills/` by `init_harness()`.
 pub const BUNDLED_SKILLS: &[(&str, &str)] = &[
     // --- Infrastructure ---
-    ("docker.md", DOCKER),
-    ("docker-compose.md", DOCKER_COMPOSE),
+    ("containers.md", CONTAINERS),
     ("server-admin.md", SERVER_ADMIN),
+    ("sops-age.md", SOPS_AGE),
+    ("deploy-fish.md", DEPLOY_FISH),
+    ("tailscale.md", TAILSCALE),
+    ("caddy-cloudflare.md", CADDY_CLOUDFLARE),
+    ("restic-backup.md", RESTIC_BACKUP),
     ("grafana.md", GRAFANA),
     ("prometheus.md", PROMETHEUS),
     // --- Dev Tools ---
@@ -30,102 +34,81 @@ pub const BUNDLED_SKILLS: &[(&str, &str)] = &[
     ("kids-game.md", KIDS_GAME_MAKER),
 ];
 
-const DOCKER: &str = r#"---
-description: "Manage Docker containers, images, volumes, and networks"
+const CONTAINERS: &str = r#"---
+description: "Manage containers and compose stacks — Docker or Podman"
 category: infrastructure
-tags: [docker, containers, devops]
+tags: [docker, podman, containers, compose]
 env:
   - DOCKER_HOST
-  - DOCKER_CONFIG
-  - DOCKER_BUILDKIT
-verify: "docker info --format '{{.ServerVersion}}'"
----
-# Docker Management
-
-## Concepts
-Docker containers are lightweight isolated processes. Images are read-only
-templates. Volumes persist data. Networks connect containers.
-
-## Instructions
-You are helping manage Docker on this system. Use these patterns:
-
-### Container lifecycle
-- `docker ps -a` — list all containers (running and stopped)
-- `docker run -d --name <n> <image>` — start detached container
-- `docker logs -f --tail 100 <n>` — follow logs, last 100 lines
-- `docker exec -it <n> sh` — interactive shell in running container
-- `docker stop <n> && docker rm <n>` — clean shutdown and removal
-
-### Image management
-- `docker images` — list local images with sizes
-- `docker pull <image>:<tag>` — pull specific version
-- `docker build -t <name>:<tag> .` — build from Dockerfile
-- `docker image prune -f` — remove dangling images
-
-### Volume and network
-- `docker volume ls` — list volumes
-- `docker volume create <name>` — create named volume
-- `docker network ls` — list networks
-- `docker network inspect <name>` — show network details
-
-### Debugging
-- `docker inspect <container>` — full container metadata as JSON
-- `docker stats --no-stream` — one-shot resource usage
-- `docker system df` — disk usage breakdown
-
-## Examples
-```bash
-# Run nginx with port mapping and volume
-docker run -d --name web -p 8080:80 -v ./html:/usr/share/nginx/html nginx:alpine
-
-# Check why a container exited
-docker logs --tail 50 <container>
-docker inspect <container> --format '{{.State.ExitCode}}: {{.State.Error}}'
-```
-"#;
-
-const DOCKER_COMPOSE: &str = r#"---
-description: "Orchestrate multi-container applications with Docker Compose"
-category: infrastructure
-tags: [docker, compose, orchestration]
-env:
-  - DOCKER_HOST
+  - CONTAINER_HOST
   - COMPOSE_FILE
   - COMPOSE_PROJECT_NAME
-verify: "docker compose version"
+verify: "command -v podman || command -v docker"
 ---
-# Docker Compose
+# Container Management
 
-## Concepts
-Compose defines multi-container apps in a YAML file. Services, networks,
-and volumes are declared together. Compose v2 is a Docker CLI plugin
-(`docker compose` not `docker-compose`).
+## Runtime Detection
+Detect which runtime is available before running commands:
+```bash
+if command -v podman &>/dev/null; then
+  RUNTIME=podman
+  COMPOSE="podman-compose"
+elif command -v docker &>/dev/null; then
+  RUNTIME=docker
+  COMPOSE="docker compose"
+fi
+```
+Docker and Podman CLIs are compatible — most commands work with either.
 
 ## Instructions
-Help manage Compose stacks. Always use `docker compose` (v2 syntax).
+Detect the runtime first, then use the appropriate commands.
 
-### Stack lifecycle
-- `docker compose up -d` — start all services detached
-- `docker compose down` — stop and remove containers (keeps volumes)
-- `docker compose down -v` — stop and remove containers AND volumes
-- `docker compose restart <service>` — restart one service
-- `docker compose pull` — pull latest images for all services
+### Container lifecycle
+- `$RUNTIME ps -a` — list all containers (running and stopped)
+- `$RUNTIME run -d --name <n> <image>` — start detached container
+- `$RUNTIME logs -f --tail 100 <n>` — follow logs, last 100 lines
+- `$RUNTIME exec -it <n> sh` — interactive shell in running container
+- `$RUNTIME stop <n> && $RUNTIME rm <n>` — clean shutdown and removal
 
-### Monitoring
-- `docker compose ps` — service status
-- `docker compose logs -f <service>` — follow one service's logs
-- `docker compose top` — running processes per service
+### Compose lifecycle
+Docker uses `docker compose` (v2 plugin). Podman uses `podman-compose`.
+- `$COMPOSE up -d` — start all services detached
+- `$COMPOSE down` — stop and remove containers (keeps volumes)
+- `$COMPOSE down -v` — stop and remove containers AND volumes
+- `$COMPOSE restart <service>` — restart one service
+- `$COMPOSE pull` — pull latest images for all services
+- `$COMPOSE ps` — service status
+- `$COMPOSE logs -f <service>` — follow one service's logs
 
-### Configuration
-- `docker compose config` — validate and render the final config
-- `docker compose --env-file .env.prod up -d` — use specific env file
+### Image management
+- `$RUNTIME images` — list local images with sizes
+- `$RUNTIME pull <image>:<tag>` — pull specific version
+- `$RUNTIME build -t <name>:<tag> .` — build from Dockerfile/Containerfile
+- `$RUNTIME image prune -f` — remove dangling images
+
+### Volume and network
+- `$RUNTIME volume ls` — list volumes
+- `$RUNTIME volume create <name>` — create named volume
+- `$RUNTIME network ls` — list networks
+
+### Podman-specific
+- Podman runs rootless by default — no `sudo` needed
+- `podman generate systemd --new --name <container>` — create systemd unit
+- `systemctl --user enable --now container-<name>.service` — auto-start on boot
+- `podman pod create --name <pod> -p 8080:80` — create a pod (groups containers)
+- `loginctl enable-linger <user>` — allow user services to run without login
+
+### Debugging
+- `$RUNTIME inspect <container>` — full container metadata as JSON
+- `$RUNTIME stats --no-stream` — one-shot resource usage
+- `$RUNTIME system df` — disk usage breakdown
 
 ## Examples
 ```yaml
-# docker-compose.yml
+# compose.yaml (works with docker compose and podman-compose)
 services:
   app:
-    build: .
+    image: myapp:latest
     ports: ["3000:3000"]
     environment:
       DATABASE_URL: postgres://db:5432/app
@@ -141,9 +124,9 @@ volumes:
 "#;
 
 const SERVER_ADMIN: &str = r#"---
-description: "System administration — services, disks, processes, SSH"
+description: "System administration — services, disks, processes, SSH, Tailscale"
 category: infrastructure
-tags: [linux, macos, sysadmin, ssh]
+tags: [linux, macos, sysadmin, ssh, tailscale, podman]
 env:
   - SSH_AUTH_SOCK
   - KUBECONFIG
@@ -157,11 +140,19 @@ and remote access. macOS uses `launchctl`, Linux uses `systemctl`.
 
 ## Instructions
 Help with system administration tasks. Detect the OS first.
+If `.anvil/inventory.toml` exists, use it to look up hosts and services.
 
 ### Service management (Linux)
 - `systemctl status <service>` — check service state
 - `systemctl restart <service>` — restart a service
 - `journalctl -u <service> -f --since '5 min ago'` — recent logs
+
+### Podman user services (Linux)
+Podman containers managed via systemd user units:
+- `systemctl --user status <service>` — check rootless container service
+- `systemctl --user restart <service>` — restart rootless container
+- `journalctl --user -u <service> --since '5 min ago'` — container logs via journal
+- `loginctl enable-linger <user>` — allow services to run without active login
 
 ### Service management (macOS)
 - `launchctl list | grep <name>` — find a service
@@ -180,7 +171,13 @@ Help with system administration tasks. Detect the OS first.
 - `curl -sI <url>` — HTTP headers only
 - `dig <domain>` or `nslookup <domain>` — DNS lookup
 
-### SSH
+### SSH over Tailscale
+When hosts are on a Tailscale mesh, use MagicDNS hostnames:
+- `ssh user@<tailscale-hostname>` — connect via Tailscale
+- `ssh user@<tailscale-hostname> '<command>'` — run remote command
+- `ssh user@<tailscale-hostname> 'cd /path && fish deploy.fish'` — remote deploy
+
+### SSH (general)
 - `ssh -T git@github.com` — test GitHub SSH
 - `ssh-add -l` — list loaded SSH keys
 - `ssh -L 8080:localhost:80 user@host` — port forward
@@ -192,6 +189,460 @@ du -sh /var/log/* | sort -rh | head -10
 
 # Check if a port is in use
 lsof -i :8080
+
+# Check a remote Podman container via Tailscale
+ssh deploy@debian-server 'podman ps'
+```
+"#;
+
+const SOPS_AGE: &str = r#"---
+description: "Encrypt and decrypt secrets with SOPS and Age"
+category: infrastructure
+tags: [sops, age, secrets, encryption, gitops]
+env:
+  - SOPS_AGE_KEY_FILE
+  - SOPS_AGE_RECIPIENTS
+verify: "sops --version && age --version"
+---
+# SOPS + Age Secrets Management
+
+## Concepts
+Age is a simple file encryption tool. SOPS (Secrets OPerationS) encrypts
+specific values in structured files (YAML, JSON, ENV) using Age keys.
+Together they enable GitOps: encrypted secrets committed to git, decrypted
+only at deploy time, plaintext deleted immediately after use.
+
+## Instructions
+Help manage encrypted secrets. Never commit plaintext `.env` files.
+
+### Age key management
+- `age-keygen -o key.txt` — generate a new Age keypair
+- The public key (starts with `age1...`) goes in `.sops.yaml`
+- The private key file is set via `SOPS_AGE_KEY_FILE` env var
+- Each host has its own Age keypair — distribute public keys, never private
+
+### .sops.yaml configuration
+```yaml
+creation_rules:
+  - path_regex: \.enc\.env$
+    age: >-
+      age1macbook...,
+      age1debian1...,
+      age1debian2...
+```
+This tells SOPS which Age recipients can decrypt files matching the path regex.
+
+### Encrypting secrets
+```bash
+# Encrypt a .env file (output to .enc.env)
+sops -e --input-type dotenv --output-type dotenv .env > .enc.env
+
+# Encrypt in-place
+sops -e -i secrets.yaml
+
+# Encrypt with explicit recipient
+sops -e --age age1... .env > .enc.env
+```
+
+### Decrypting secrets
+```bash
+# Decrypt to stdout
+sops -d .enc.env
+
+# Decrypt to file (for deploy scripts)
+sops -d .enc.env > .env
+
+# Always delete plaintext after use
+rm .env
+```
+
+### Adding a new host
+1. Generate Age keypair on the new host: `age-keygen -o ~/.config/sops/age/keys.txt`
+2. Copy the public key (`age1...`)
+3. Add it to `.sops.yaml` creation rules
+4. Re-encrypt all secrets: `sops updatekeys .enc.env`
+
+### GitOps pattern
+- `.enc.env` → committed to git (encrypted, safe)
+- `.env` → NEVER committed (in `.gitignore`)
+- Deploy: `sops -d .enc.env > .env && compose up && rm .env`
+"#;
+
+const DEPLOY_FISH: &str = r#"---
+description: "Scaffold Fish shell deploy scripts — git pull, decrypt, compose up, cleanup"
+category: infrastructure
+tags: [fish, deploy, gitops, sops, compose]
+env:
+  - SOPS_AGE_KEY_FILE
+  - DEPLOY_TARGET
+depends:
+  - sops-age
+  - containers
+verify: "fish --version && sops --version"
+---
+# Deploy Script (Fish Shell)
+
+## Concepts
+The deploy.fish pattern is a four-step GitOps deployment:
+1. `git pull` — fetch latest encrypted configs from the repo
+2. `sops -d .enc.env > .env` — decrypt secrets
+3. `podman-compose up -d` or `docker compose up -d` — start services
+4. `rm .env` — clean up plaintext secrets
+
+Each service lives in its own git repo with a `compose.yaml` and `.enc.env`.
+
+## Instructions
+Help scaffold new deploy.fish scripts and run existing ones.
+
+### Canonical deploy.fish template
+```fish
+#!/usr/bin/env fish
+# Deploy script — git pull, decrypt, compose up, cleanup
+
+set -l service_dir (dirname (status filename))
+cd $service_dir
+
+echo "Pulling latest config..."
+git pull --ff-only
+or begin
+    echo "Git pull failed — resolve conflicts first"
+    exit 1
+end
+
+echo "Decrypting secrets..."
+sops -d --input-type dotenv --output-type dotenv .enc.env > .env
+or begin
+    echo "Decryption failed — check SOPS_AGE_KEY_FILE"
+    exit 1
+end
+
+# Detect container runtime
+if command -v podman-compose &>/dev/null
+    set compose_cmd podman-compose
+else if command -v docker &>/dev/null
+    set compose_cmd docker compose
+else
+    echo "No container runtime found"
+    rm -f .env
+    exit 1
+end
+
+echo "Starting services with $compose_cmd..."
+$compose_cmd up -d
+set -l compose_status $status
+
+# Always clean up plaintext secrets
+rm -f .env
+
+if test $compose_status -ne 0
+    echo "Compose failed with status $compose_status"
+    exit 1
+end
+
+echo "Deploy complete — verifying..."
+$compose_cmd ps
+```
+
+### Remote deployment
+```bash
+# Run deploy.fish on a remote host via SSH
+ssh user@<tailscale-host> 'cd /srv/valheim && fish deploy.fish'
+```
+
+### Rollback
+```fish
+# Revert to previous version
+git stash
+fish deploy.fish
+```
+
+### Scaffolding a new service
+1. Create a git repo for the service
+2. Add `compose.yaml` with service definition
+3. Create `.env` with secrets, encrypt: `sops -e .env > .enc.env && rm .env`
+4. Add `.env` to `.gitignore`
+5. Copy the deploy.fish template above
+6. Commit `.enc.env`, `compose.yaml`, `deploy.fish`, `.gitignore`
+"#;
+
+const TAILSCALE: &str = r#"---
+description: "Manage Tailscale mesh VPN — status, connectivity, MagicDNS"
+category: infrastructure
+tags: [tailscale, vpn, mesh, networking]
+env:
+  - TS_AUTHKEY
+verify: "tailscale version"
+---
+# Tailscale Mesh VPN
+
+## Concepts
+Tailscale creates a WireGuard-based mesh VPN (tailnet) between devices.
+MagicDNS assigns hostnames to each node so you can `ssh server-name`
+instead of remembering IPs. All traffic is encrypted end-to-end.
+
+## Instructions
+Help manage Tailscale connectivity and troubleshoot mesh issues.
+
+### Node status
+- `tailscale status` — list all nodes, their IPs, and online status
+- `tailscale status --json` — machine-readable output
+- `tailscale ip -4 <hostname>` — get a node's Tailscale IPv4 address
+- `tailscale ping <hostname>` — test direct connectivity (vs relayed)
+
+### Joining a node
+```bash
+# Interactive login
+tailscale up
+
+# Non-interactive with auth key (for servers)
+tailscale up --authkey=tskey-auth-...
+
+# Advertise as subnet router
+tailscale up --advertise-routes=192.168.1.0/24
+
+# Advertise as exit node
+tailscale up --advertise-exit-node
+```
+
+### SSH over Tailscale
+Tailscale MagicDNS lets you SSH by hostname:
+```bash
+ssh user@debian-server          # MagicDNS hostname
+ssh user@100.64.0.2             # Tailscale IP (if MagicDNS is off)
+```
+
+### DNS and networking
+- MagicDNS: enabled by default, resolves `<hostname>` within the tailnet
+- `tailscale dns status` — show DNS configuration
+- `tailscale netcheck` — diagnose connectivity (DERP relays, NAT type)
+
+### Administration
+- ACLs are managed in the Tailscale admin console (https://login.tailscale.com/admin/acls)
+- `tailscale up --reset` — re-authenticate and reset node state
+- `tailscale down` — disconnect from tailnet (keeps config)
+- `tailscale logout` — fully deauthenticate
+
+### Troubleshooting
+- `tailscale ping <host>` shows "via DERP" → nodes can't connect directly (NAT issue)
+- `tailscale netcheck` — check NAT type, DERP relay latency
+- `tailscale bugreport` — generate diagnostic bundle
+"#;
+
+const CADDY_CLOUDFLARE: &str = r#"---
+description: "Reverse proxy with Caddy — Cloudflare DNS challenge for HTTPS"
+category: infrastructure
+tags: [caddy, cloudflare, https, reverse-proxy, dns]
+env:
+  - CLOUDFLARE_API_TOKEN
+  - CF_ZONE_ID
+verify: "caddy version"
+---
+# Caddy + Cloudflare DNS
+
+## Concepts
+Caddy is a web server with automatic HTTPS. For private networks (not
+reachable from the internet), Caddy uses the Cloudflare DNS-01 ACME
+challenge to obtain certificates — it proves domain ownership by creating
+a DNS TXT record via the Cloudflare API instead of serving a challenge file.
+
+## Instructions
+Help configure Caddy as a reverse proxy with Cloudflare DNS challenge.
+
+### Custom build with Cloudflare plugin
+Caddy needs the Cloudflare DNS plugin compiled in:
+```bash
+# Install xcaddy
+go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+
+# Build Caddy with Cloudflare DNS plugin
+xcaddy build --with github.com/caddy-dns/cloudflare
+```
+
+### Caddyfile with DNS challenge
+```
+service.example.com {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+    reverse_proxy localhost:8080
+}
+
+another.example.com {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+    reverse_proxy localhost:3000
+}
+```
+
+### Wildcard certificate
+```
+*.example.com {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+
+    @immich host immich.example.com
+    handle @immich {
+        reverse_proxy localhost:2283
+    }
+
+    @paperless host paperless.example.com
+    handle @paperless {
+        reverse_proxy localhost:8000
+    }
+}
+```
+
+### Cloudflare API token
+Create a token at https://dash.cloudflare.com/profile/api-tokens with:
+- Zone / Zone / Read
+- Zone / DNS / Edit
+Scope it to the specific zone (domain).
+
+### Running in a container
+```yaml
+services:
+  caddy:
+    image: custom-caddy:latest  # built with xcaddy + cloudflare plugin
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
+    restart: unless-stopped
+volumes:
+  caddy_data:
+  caddy_config:
+```
+
+### Tailscale integration
+Caddy on the Tailscale network can proxy to services on any node:
+```
+service.example.com {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+    reverse_proxy http://debian-server-2:8080  # Tailscale MagicDNS hostname
+}
+```
+"#;
+
+const RESTIC_BACKUP: &str = r#"---
+description: "Encrypted, deduplicated backups with Restic"
+category: infrastructure
+tags: [restic, backup, disaster-recovery]
+env:
+  - RESTIC_REPOSITORY
+  - RESTIC_PASSWORD
+  - AWS_ACCESS_KEY_ID
+  - AWS_SECRET_ACCESS_KEY
+verify: "restic version"
+---
+# Restic Backups
+
+## Concepts
+Restic creates encrypted, deduplicated backups. Each backup is a snapshot.
+Repositories can be local, SFTP, or S3-compatible. Deduplication means
+only changed blocks are stored, making incremental backups fast and small.
+
+## Instructions
+Help manage Restic backup repositories, snapshots, and restore operations.
+
+### Repository initialization
+```bash
+# Local repository
+restic init -r /backup/repo
+
+# SFTP repository (via Tailscale)
+restic init -r sftp:user@backup-server:/backup/repo
+
+# S3-compatible (MinIO, Backblaze B2, etc.)
+restic init -r s3:https://s3.example.com/bucket-name
+```
+
+### Backup
+```bash
+# Backup a directory
+restic backup /srv/data --tag myservice
+
+# Backup with exclusions
+restic backup /srv/data --exclude='*.log' --exclude='.cache'
+
+# Backup multiple paths
+restic backup /srv/service1 /srv/service2 --tag services
+```
+
+### Snapshots
+```bash
+# List all snapshots
+restic snapshots
+
+# List snapshots for a specific tag
+restic snapshots --tag myservice
+
+# Show files in a snapshot
+restic ls latest
+```
+
+### Restore
+```bash
+# Restore latest snapshot to a target directory
+restic restore latest --target /restore/path
+
+# Restore a specific snapshot
+restic restore abc123 --target /restore/path
+
+# Restore specific files
+restic restore latest --target /restore/path --include '/srv/data/config'
+```
+
+### Retention and pruning
+```bash
+# Apply retention policy and remove old data
+restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
+
+# Dry run first
+restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --dry-run
+```
+
+### Maintenance
+```bash
+# Verify repository integrity
+restic check
+
+# Full data verification (slow but thorough)
+restic check --read-data
+```
+
+### Automated backups (systemd timer)
+```ini
+# /etc/systemd/system/restic-backup.service
+[Unit]
+Description=Restic backup
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/restic/env
+ExecStart=restic backup /srv/data --tag automated
+ExecStartPost=restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
+```
+
+```ini
+# /etc/systemd/system/restic-backup.timer
+[Unit]
+Description=Daily Restic backup
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
 ```
 "#;
 

@@ -216,8 +216,8 @@ pub fn spawn_engine_task(
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<anvil_agent::Agent> {
     tokio::spawn(async move {
-        use anvil_agent::AgentEvent;
         use anvil_agent::achievements::{AchievementStore, SessionTracker};
+        use anvil_agent::AgentEvent;
 
         let mut agent = agent;
         let mut tracker = SessionTracker::new();

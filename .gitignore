@@ -15,14 +15,30 @@
 .LSOverride
 
 # Environment-specific (never commit)
-.devcontainer/
-.ona/
+
+# Ona review state (auto-generated, not committed)
+.ona/review/
 .env
 .env.*
 
 # Anvil harness (project-specific, created by `anvil init`)
 # Users create their own via `anvil init` — don't ship ours
 .anvil/
+
+# Database files (session SQLite)
+*.db
+*.sqlite
+*.sqlite3
+
+# Log files
+*.log
+
+# Editor backup files
+*.bak
+*.orig
+
+# Spec files (temporary planning artifacts)
+spec.md
 
 # OS temp files
 Thumbs.db

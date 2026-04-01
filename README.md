@@ -56,11 +56,11 @@ for Qwen3-Coder, Qwen3, Devstral, DeepSeek-R1, and GLM-4.7-Flash.
 Auto-applied when the model name matches. All fit on 64GB Apple Silicon.
 
 ### Skills System
-17 bundled skills across four categories:
+21 bundled skills across four categories:
 
 | Category | Skills |
 |----------|--------|
-| Infrastructure | docker, docker-compose, server-admin, grafana, prometheus |
+| Infrastructure | containers, server-admin, sops-age, deploy-fish, tailscale, caddy-cloudflare, restic-backup, grafana, prometheus |
 | Dev Tools | nvim, zellij, fish, git-workflow |
 | Meta | verify-all, verify-shell, verify-files, learn-anvil, learn-rust |
 | Kids | kids-first, kids-story, kids-game |

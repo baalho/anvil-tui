@@ -63,35 +63,81 @@ pub async fn handle_command(
 }
 
 fn help_text() -> String {
-    [
-        "Available commands:",
-        "  /help                        Show this help",
-        "  /stats                       Token usage and session info",
-        "  /model [name]                Show or switch model",
-        "  /backend [type url]          Show or switch backend (ollama|llama|mlx|custom)",
-        "  /backend start llama <model>  Start a managed llama-server",
-        "  /backend stop                Stop the managed backend",
-        "  /history                     List recent sessions",
-        "  /skill [name]                List or activate a skill",
-        "  /skill clear                 Deactivate all skills",
-        "  /skill verify <name>         Run a skill's verification command",
-        "  /ralph <prompt> --verify <cmd> Run autonomous mode (Ralph Loop)",
-        "  /clear                       Compact conversation context",
-        "  /think                       Toggle <think> block visibility",
-        "  /route [tool model]          Show or set model routing",
-        "  /memory                      List stored patterns",
-        "  /memory                      List stored patterns",
-        "  /memory add <pattern>        Save a new pattern",
-        "  /memory add category:<t> <p> Save with category (convention|gotcha|pattern)",
-        "  /memory search <keyword>     Search memories",
-        "  /memory rm <filename>        Remove one entry",
-        "  /memory clear                Remove all patterns",
-        "  /mcp                         List MCP servers and tools",
-        "  /persona [name]              List or activate a character persona",
-        "  /persona clear               Deactivate persona",
-        "  /end                         End session and exit",
-    ]
-    .join("\n")
+    let mut out = String::new();
+
+    let sections: &[(&str, &[(&str, &str)])] = &[
+        (
+            "Navigation",
+            &[
+                ("/help", "Show this help"),
+                ("/end", "End session and exit"),
+                ("/history", "List recent sessions"),
+            ],
+        ),
+        (
+            "Model & Backend",
+            &[
+                ("/model [name]", "Show or switch model"),
+                ("/backend [type url]", "Show or switch backend"),
+                ("/backend start llama <model>", "Start managed llama-server"),
+                ("/backend stop", "Stop managed backend"),
+                ("/route [tool model]", "Show or set model routing"),
+            ],
+        ),
+        (
+            "Skills & Personas",
+            &[
+                ("/skill [name]", "List, activate, or verify skills"),
+                ("/skill clear", "Deactivate all skills"),
+                ("/persona [name]", "Activate a persona"),
+                ("/persona clear", "Deactivate persona"),
+            ],
+        ),
+        (
+            "Context",
+            &[
+                ("/clear", "Compact conversation context"),
+                ("/think", "Toggle <think> block visibility"),
+                ("/memory", "List stored patterns"),
+                ("/memory add <pattern>", "Save a new pattern"),
+                ("/memory search <keyword>", "Search memories"),
+                ("/stats", "Token usage and session info"),
+            ],
+        ),
+        (
+            "Automation",
+            &[
+                (
+                    "/ralph <prompt> --verify <cmd>",
+                    "Autonomous mode (Ralph Loop)",
+                ),
+                ("/mcp", "List MCP servers and tools"),
+            ],
+        ),
+    ];
+
+    // Use ANSI escape codes directly for reliable cross-platform coloring.
+    // crossterm's execute! macro requires &mut impl Write, but we're building a String.
+    let cyan = "\x1b[36m";
+    let green = "\x1b[32m";
+    let dim = "\x1b[2m";
+    let reset = "\x1b[0m";
+
+    for (i, (category, commands)) in sections.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!(" {cyan}{category}{reset}\n"));
+        for (cmd, desc) in *commands {
+            out.push_str(&format!("  {green}{cmd:<34}{reset} {dim}{desc}{reset}\n"));
+        }
+    }
+
+    // Trim trailing newline
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    out
 }
 
 fn route_command(agent: &mut Agent, arg: &str) -> String {
@@ -293,18 +339,50 @@ fn persona_command(agent: &mut Agent, arg: &str) -> String {
         Some(persona) => {
             let greeting = persona.greeting.clone();
             let name = persona.name.clone();
+            let key = persona.key.clone();
             agent.set_persona(Some(persona));
 
-            // Auto-activate kids-first skill for immediate fun
-            let mut skill_note = String::new();
+            // Auto-activate skills based on persona
             let loader = SkillLoader::new(agent.workspace());
-            if let Ok(skill) = loader.get("kids-first") {
-                agent.activate_skill(skill);
-                skill_note = "\n\n  ready to make cool stuff! just say what you like.\
+            let skill_note = match key.as_str() {
+                "sparkle" | "bolt" | "codebeard" => {
+                    // Kids personas: auto-activate kids-first
+                    if let Ok(skill) = loader.get("kids-first") {
+                        agent.activate_skill(skill);
+                    }
+                    "\n\n  ready to make cool stuff! just say what you like.\
                      \n  try: /skill kids-story  (story mode)\
                      \n       /skill kids-game   (build a game)"
-                    .to_string();
-            }
+                        .to_string()
+                }
+                "homelab" => {
+                    // Homelab persona: auto-activate infrastructure skills
+                    let infra_skills = [
+                        "containers",
+                        "sops-age",
+                        "deploy-fish",
+                        "tailscale",
+                        "server-admin",
+                    ];
+                    let mut activated = Vec::new();
+                    for skill_key in &infra_skills {
+                        if let Ok(skill) = loader.get(skill_key) {
+                            agent.activate_skill(skill);
+                            activated.push(*skill_key);
+                        }
+                    }
+                    if activated.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "\n\n  skills: {}\
+                             \n  also available: /skill caddy-cloudflare, /skill restic-backup",
+                            activated.join(", ")
+                        )
+                    }
+                }
+                _ => String::new(),
+            };
 
             format!("{name} activated!\n\n{greeting}{skill_note}")
         }

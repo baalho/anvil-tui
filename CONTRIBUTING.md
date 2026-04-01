@@ -35,7 +35,8 @@ crates/
   anvil/          # CLI binary, interactive mode, slash commands
 ```
 
-Dependencies flow: `anvil-config` → `anvil-llm` / `anvil-tools` / `anvil-mcp` → `anvil-agent` → `anvil`.
+Dependencies flow: `anvil-config` → `anvil-llm` / `anvil-tools` → `anvil-agent` → `anvil`.
+`anvil-mcp` has no internal dependencies (connects directly to `anvil-agent`).
 
 ## Adding a Tool
 

@@ -107,6 +107,26 @@ pub fn builtin_personas() -> Vec<Persona> {
                 "Ahoy, matey! I'm Captain Codebeard! What adventure shall we go on? 🏴‍☠️"
                     .to_string(),
         },
+        Persona {
+            key: "homelab".to_string(),
+            name: "Homelab Mode".to_string(),
+            description: "Infrastructure management with deploy awareness".to_string(),
+            prompt: [
+                "You are in Homelab Mode — infrastructure management for a multi-host environment.",
+                "",
+                "Behavior:",
+                "- Read .anvil/inventory.toml to identify hosts and services",
+                "- When asked to start/stop/deploy a service, find the correct host from inventory",
+                "- Use SSH over Tailscale for remote commands: ssh <user>@<tailscale_name> '<cmd>'",
+                "- Follow the deploy.fish pattern: git pull → sops decrypt → compose up → rm .env",
+                "- Detect container runtime per host (docker or podman) from inventory",
+                "- Always verify service status after deployment",
+                "- Be concise — show command output, not explanations",
+                "- When scaffolding deploy scripts, use Fish shell syntax",
+            ]
+            .join("\n"),
+            greeting: "⚙ Homelab mode active. What do you need to deploy or manage?".to_string(),
+        },
     ]
 }
 
@@ -123,10 +143,11 @@ mod tests {
     #[test]
     fn builtin_personas_exist() {
         let personas = builtin_personas();
-        assert_eq!(personas.len(), 3);
+        assert_eq!(personas.len(), 4);
         assert_eq!(personas[0].key, "sparkle");
         assert_eq!(personas[1].key, "bolt");
         assert_eq!(personas[2].key, "codebeard");
+        assert_eq!(personas[3].key, "homelab");
     }
 
     #[test]
@@ -134,6 +155,7 @@ mod tests {
         assert!(find_persona("Sparkle").is_some());
         assert!(find_persona("BOLT").is_some());
         assert!(find_persona("codebeard").is_some());
+        assert!(find_persona("Homelab").is_some());
     }
 
     #[test]
@@ -159,5 +181,14 @@ mod tests {
         assert!(sparkle.prompt.contains("simple words"));
         // Should instruct the LLM to never explain unprompted
         assert!(sparkle.prompt.contains("NEVER"));
+    }
+
+    #[test]
+    fn homelab_prompt_has_infra_patterns() {
+        let homelab = find_persona("homelab").unwrap();
+        assert!(homelab.prompt.contains("inventory.toml"));
+        assert!(homelab.prompt.contains("deploy.fish"));
+        assert!(homelab.prompt.contains("ssh"));
+        assert!(homelab.prompt.contains("Tailscale"));
     }
 }

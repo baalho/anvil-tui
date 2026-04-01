@@ -26,7 +26,7 @@ Ollama, llama-server, or MLX.
 ```
 
 Dependencies flow downward. `anvil-config` has no internal dependencies.
-`anvil-llm` and `anvil-mcp` depend on `anvil-config`. `anvil-tools` depends
+`anvil-llm` depends on `anvil-config`. `anvil-mcp` has no internal deps. `anvil-tools` depends
 on nothing internal. `anvil-agent` depends on all four library crates.
 The `anvil` binary depends on `anvil-agent`.
 
@@ -146,13 +146,13 @@ Created by `anvil init`. Structure:
 │   ├── devstral.toml
 │   ├── deepseek-r1.toml
 │   └── glm-4.7-flash.toml
-├── skills/              # Prompt template skills (17 bundled)
-│   ├── docker.md
+├── skills/              # Prompt template skills (21 bundled)
+│   ├── containers.md
 │   ├── server-admin.md
 │   ├── nvim.md
 │   ├── verify-all.md
 │   └── ...
-└── memory/              # Reserved for future use
+└── memory/              # Persistent learned patterns (categorized markdown)
 ```
 
 ## Backends
@@ -237,9 +237,9 @@ Skills are markdown files that inject domain knowledge into the system prompt.
 
 ```
 /skill              # List all skills (grouped by category)
-/skill docker       # Activate the Docker skill
+/skill containers   # Activate the containers skill
 /skill clear        # Deactivate all skills
-/skill verify docker  # Run Docker's verification command
+/skill verify containers  # Run the containers verification command
 ```
 
 ### Writing a skill
@@ -250,10 +250,10 @@ Create a `.md` file in `.anvil/skills/`:
 ---
 description: "Short description for /skill listing"
 category: infrastructure
-tags: [docker, containers]
+tags: [containers, compose]
 env:
-  - DOCKER_HOST
-verify: "docker info"
+  - CONTAINER_HOST
+verify: "command -v podman || command -v docker"
 ---
 # Skill Name
 
@@ -327,7 +327,7 @@ anvil run -p "optimize the build" -a --verify "cargo build" --max-minutes 15
 | `/memory clear` | Remove all patterns |
 | `/mcp` | List MCP servers and tools |
 | `/mcp shutdown` | Shut down all MCP servers |
-| `/persona [name]` | List or activate a character persona (sparkle, bolt, codebeard) |
+| `/persona [name]` | List or activate a persona (sparkle, bolt, codebeard, homelab) |
 | `/persona clear` | Deactivate persona |
 | `/history` | List recent sessions |
 | `/end` | End session and exit |

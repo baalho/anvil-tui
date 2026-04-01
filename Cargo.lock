@@ -72,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "anvil"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anvil-agent",
  "anvil-config",
@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-agent"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anvil-config",
  "anvil-llm",
@@ -116,7 +116,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-config"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -130,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-llm"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anvil-config",
  "anyhow",
@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-mcp"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -162,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-tools"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anvil-config",
  "anyhow",
