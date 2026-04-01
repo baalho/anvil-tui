@@ -11,22 +11,24 @@ Ollama, llama-server, or MLX.
 │  CLI parsing, interactive mode, autonomous loop          │
 ├─────────────────────────────────────────────────────────┤
 │                   anvil-agent                            │
-│  Agent loop, skills, system prompt, sessions, autonomy   │
-├──────────────────────┬──────────────────────────────────┤
-│     anvil-tools      │          anvil-llm                │
-│  7 tools, executor,  │  HTTP client, SSE streaming,      │
-│  permissions, trunc  │  retry, token usage               │
-├──────────────────────┴──────────────────────────────────┤
+│  Agent loop, skills, personas, achievements, sessions    │
+├──────────────┬──────────────┬───────────────────────────┤
+│  anvil-tools │  anvil-llm   │       anvil-mcp            │
+│  11 tools,   │  HTTP client,│  MCP client, JSON-RPC      │
+│  executor,   │  SSE stream, │  over stdio, tool          │
+│  plugins,    │  retry,      │  discovery + dispatch      │
+│  hooks       │  token usage │                            │
+├──────────────┴──────────────┴───────────────────────────┤
 │                   anvil-config                           │
 │  Settings, provider config, model profiles, bundled      │
-│  skills, harness directory management                    │
+│  skills, MCP config, harness directory management        │
 └─────────────────────────────────────────────────────────┘
 ```
 
 Dependencies flow downward. `anvil-config` has no internal dependencies.
-`anvil-llm` depends on `anvil-config`. `anvil-tools` depends on nothing
-internal. `anvil-agent` depends on all three. The `anvil` binary depends
-on `anvil-agent`.
+`anvil-llm` and `anvil-mcp` depend on `anvil-config`. `anvil-tools` depends
+on nothing internal. `anvil-agent` depends on all four library crates.
+The `anvil` binary depends on `anvil-agent`.
 
 ## macOS Setup (M-series Mac)
 
@@ -78,8 +80,8 @@ mlx_lm.server --model mlx-community/Qwen3-Coder-30B-4bit --port 8080
 
 ```bash
 # Clone and build
-git clone https://github.com/baalho/anvil-cli.git
-cd anvil-cli
+git clone https://github.com/baalho/anvil-tui.git
+cd anvil-tui
 cargo build --release
 
 # Install to PATH
@@ -144,7 +146,7 @@ Created by `anvil init`. Structure:
 │   ├── devstral.toml
 │   ├── deepseek-r1.toml
 │   └── glm-4.7-flash.toml
-├── skills/              # Prompt template skills (14 bundled)
+├── skills/              # Prompt template skills (17 bundled)
 │   ├── docker.md
 │   ├── server-admin.md
 │   ├── nvim.md
@@ -310,10 +312,24 @@ anvil run -p "optimize the build" -a --verify "cargo build" --max-minutes 15
 | `/stats` | Token usage, model, backend, env passthrough |
 | `/model [name]` | Show or switch model |
 | `/backend [type url]` | Show or switch backend |
+| `/backend start llama <model>` | Start a managed llama-server |
+| `/backend stop` | Stop the managed backend |
 | `/skill [name]` | List, activate, or verify skills |
-| `/ralph` | Show autonomous mode usage |
+| `/ralph <prompt> --verify <cmd>` | Run autonomous mode (Ralph Loop) |
+| `/clear` | Compact conversation context via LLM summary |
+| `/think` | Toggle `<think>` block visibility |
+| `/route [tool model]` | Show or set model routing |
+| `/memory` | List stored patterns (categorized) |
+| `/memory add <pattern>` | Save a new pattern |
+| `/memory add category:<tag> <pat>` | Save with category (convention, gotcha, pattern) |
+| `/memory search <keyword>` | Search memories by keyword |
+| `/memory rm <filename>` | Remove a specific memory |
+| `/memory clear` | Remove all patterns |
+| `/mcp` | List MCP servers and tools |
+| `/mcp shutdown` | Shut down all MCP servers |
+| `/persona [name]` | List or activate a character persona (sparkle, bolt, codebeard) |
+| `/persona clear` | Deactivate persona |
 | `/history` | List recent sessions |
-| `/clear` | Compact context (placeholder) |
 | `/end` | End session and exit |
 
 ## How to Add a New Tool
@@ -321,8 +337,10 @@ anvil run -p "optimize the build" -a --verify "cargo build" --max-minutes 15
 1. Define the tool schema in `crates/anvil-tools/src/definitions.rs`
 2. Implement the tool function in `crates/anvil-tools/src/tools.rs`
 3. Add the dispatch case in `crates/anvil-tools/src/executor.rs`
-4. Add tests in `crates/anvil-tools/tests/tool_tests.rs`
-5. Update the tool count in system prompt (`crates/anvil-agent/src/system_prompt.rs`)
+4. Classify as read-only or mutating in `crates/anvil-tools/src/permission.rs`
+5. Add validation rules in `executor.rs` `validate_args()`
+6. Add tests in `crates/anvil-tools/tests/tool_tests.rs`
+7. Update the tool count in `tests/definition_tests.rs`
 
 ## How the Agent Loop Works
 
@@ -370,9 +388,16 @@ max_tokens = 200000                   # session token budget
 warn_threshold_pct = 80              # warn at this % of context window
 loop_detection_limit = 10            # max identical consecutive tool calls
 context_window = 8192                # overridden by model profile
+auto_compact_threshold = 80          # auto-compact at this % (0 = disabled)
 
 [tools]
 shell_timeout_secs = 30              # per-command timeout
 file_timeout_secs = 5                # file operation timeout
 output_limit = 10000                 # max bytes before truncation
+
+# MCP (Model Context Protocol) — connect external tool servers
+# [[mcp.servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
 ```

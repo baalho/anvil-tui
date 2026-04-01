@@ -67,7 +67,7 @@ infrastructure). Track 4 depends on Track 3 (uses the new crate structure).
 ### S31: AGENTS.md Rewrite
 
 **Problem**: AGENTS.md is the single source of truth but contains 13+
-inaccuracies. It says v0.1.0, 91 tests, repo `anvil-cli`, and lists
+inaccuracies. It previously said v0.1.0, 91 tests, repo `anvil-cli`, and listed
 implemented features as "deferred".
 
 **Requirements**:

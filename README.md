@@ -12,8 +12,8 @@ ollama serve &                    # start in background
 ollama pull qwen3-coder:30b      # 19GB — best coding agent model
 
 # Build Anvil
-git clone https://github.com/baalho/anvil-cli.git
-cd anvil-cli
+git clone https://github.com/baalho/anvil-tui.git
+cd anvil-tui
 cargo build --release
 cp target/release/anvil ~/.local/bin/
 ```
@@ -56,13 +56,14 @@ for Qwen3-Coder, Qwen3, Devstral, DeepSeek-R1, and GLM-4.7-Flash.
 Auto-applied when the model name matches. All fit on 64GB Apple Silicon.
 
 ### Skills System
-14 bundled skills across three categories:
+17 bundled skills across four categories:
 
 | Category | Skills |
 |----------|--------|
 | Infrastructure | docker, docker-compose, server-admin, grafana, prometheus |
 | Dev Tools | nvim, zellij, fish, git-workflow |
 | Meta | verify-all, verify-shell, verify-files, learn-anvil, learn-rust |
+| Kids | kids-first-program, kids-storytelling, kids-game-maker |
 
 Skills support YAML frontmatter for metadata, env passthrough, and
 verification commands. Write your own in `.anvil/skills/`.
@@ -76,8 +77,22 @@ anvil run -p "fix all tests" -a --verify "cargo test" --max-iterations 5
 
 Guardrails: iteration limit, token budget, wall-clock timeout.
 
-### 7 Built-in Tools
-`shell`, `file_read`, `file_write`, `file_edit`, `grep`, `ls`, `find`
+### 11 Built-in Tools
+`shell`, `file_read`, `file_write`, `file_edit`, `grep`, `ls`, `find`,
+`git_status`, `git_diff`, `git_log`, `git_commit`
+
+### MCP (Model Context Protocol)
+Connect external tool servers via MCP over stdio. Configure in
+`.anvil/config.toml` under `[mcp]`. Tools are namespaced as
+`mcp_{server}_{tool}` to avoid conflicts.
+
+### Character Personas
+Fun mode for kids: `/persona sparkle` activates Sparkle the Coding Unicorn.
+Also available: Bolt the Robot and Captain Codebeard.
+
+### Achievement System
+10 unlockable badges that celebrate coding milestones. Persona-themed
+unlock notifications. Persisted in `.anvil/achievements.json`.
 
 ### Session Persistence
 SQLite-backed sessions with resume: `anvil -c` resumes the last session.
@@ -85,14 +100,24 @@ SQLite-backed sessions with resume: `anvil -c` resumes the last session.
 ## Interactive Commands
 
 ```
-/help                        Show all commands
-/stats                       Token usage, model, backend info
-/model [name]                Show or switch model
-/backend [type url]          Show or switch backend
-/skill [name]                List, activate, or verify skills
-/ralph                       Autonomous mode usage
-/history                     List recent sessions
-/end                         End session and exit
+/help                          Show all commands
+/stats                         Token usage, model, backend info
+/model [name]                  Show or switch model
+/backend [type url]            Show or switch backend
+/backend start llama <model>   Start a managed llama-server
+/backend stop                  Stop the managed backend
+/skill [name]                  List, activate, or verify skills
+/ralph <prompt> --verify <cmd> Autonomous mode
+/clear                         Compact conversation context
+/think                         Toggle <think> block visibility
+/route [tool model]            Show or set model routing
+/memory                        List stored patterns
+/memory add <pattern>          Save a new pattern
+/memory search <keyword>       Search memories
+/mcp                           List MCP servers and tools
+/persona [name]                Activate a character persona
+/history                       List recent sessions
+/end                           End session and exit
 ```
 
 ## Configuration
@@ -107,16 +132,20 @@ model = "qwen3-coder:30b"
 [agent]
 context_window = 8192                  # overridden by model profile
 loop_detection_limit = 10
+auto_compact_threshold = 80            # auto-compact at 80% context usage
 
 [tools]
 shell_timeout_secs = 30
+
+[mcp]
+servers = []
 ```
 
 ## Documentation
 
 - [MANUAL.md](MANUAL.md) — full usage guide, architecture, how-tos
 - [LESSONS_LEARNED.md](LESSONS_LEARNED.md) — what worked, what didn't, patterns to reuse
-- [spec-v3.md](spec-v3.md) — design specification
+- [AGILE.md](AGILE.md) — feature roadmap
 
 ## Project Structure
 
@@ -124,11 +153,12 @@ shell_timeout_secs = 30
 crates/
 ├── anvil-config    # Settings, model profiles, bundled skills, harness management
 ├── anvil-llm       # OpenAI-compatible HTTP client, SSE streaming, retry
-├── anvil-tools     # 7 tools, executor, permissions, output truncation
-├── anvil-agent     # Agent loop, skills, system prompt, sessions, autonomous mode
+├── anvil-tools     # 11 tools, executor, permissions, output truncation
+├── anvil-mcp       # MCP client — JSON-RPC over stdio for external tool servers
+├── anvil-agent     # Agent loop, skills, personas, achievements, sessions
 └── anvil           # CLI binary, interactive mode, slash commands
 ```
 
 ## License
 
-MIT
+Apache-2.0

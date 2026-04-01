@@ -12,10 +12,10 @@ for project context.
 backends (Ollama, llama-server, MLX) via the OpenAI-compatible chat completions
 API. It runs offline, works airgapped, and never sends data to remote servers.
 
-- **Repository**: https://github.com/baalho/anvil-cli
+- **Repository**: https://github.com/baalho/anvil-tui
 - **License**: Apache-2.0 (workspace `Cargo.toml`)
 - **Rust edition**: 2021, MSRV 1.75
-- **Current version**: 0.1.0
+- **Current version**: 1.1.0
 - **Target platform**: macOS (Apple Silicon primary), Linux, Windows/WSL
 - **Default model**: `qwen3-coder:30b` (Ollama)
 
@@ -29,10 +29,13 @@ API. It runs offline, works airgapped, and never sends data to remote servers.
 anvil-config ──┬──► anvil-llm ──┐
                │                ├──► anvil-agent ──► anvil (binary)
                └──► anvil-tools ┘
+                                │
+               anvil-mcp ───────┘
 ```
 
 Dependencies flow left-to-right. `anvil-config` has no internal dependencies.
-`anvil-agent` depends on all three library crates. `anvil` is the CLI binary.
+`anvil-mcp` depends on `anvil-config`. `anvil-agent` depends on all four
+library crates. `anvil` is the CLI binary.
 
 ### 2.2 Crate Responsibilities
 
@@ -40,8 +43,9 @@ Dependencies flow left-to-right. `anvil-config` has no internal dependencies.
 |-------|---------|-----------|
 | `anvil-config` | Settings, `.anvil/` harness, model profiles, bundled skills | `Settings`, `ProviderConfig`, `BackendKind`, `ModelProfile`, `SamplingConfig` |
 | `anvil-llm` | OpenAI-compatible HTTP client, SSE streaming, retry | `LlmClient`, `ChatRequest`, `ChatResponse`, `StreamEvent`, `TokenUsage` |
-| `anvil-tools` | 7 tools, executor, permissions, output truncation | `ToolExecutor`, `PermissionHandler`, `TruncationConfig` |
-| `anvil-agent` | Agent loop, skills, system prompt, sessions, autonomous mode | `Agent`, `AgentEvent`, `Skill`, `SkillLoader`, `AutonomousRunner` |
+| `anvil-tools` | 11 tools, executor, permissions, plugins, hooks, truncation | `ToolExecutor`, `PermissionHandler`, `TruncationConfig` |
+| `anvil-mcp` | MCP client — JSON-RPC over stdio for external tool servers | `McpManager`, `McpServerConfig`, `McpTool` |
+| `anvil-agent` | Agent loop, skills, personas, achievements, sessions, autonomous mode | `Agent`, `AgentEvent`, `Skill`, `SkillLoader`, `AutonomousRunner`, `Persona`, `AchievementStore` |
 | `anvil` | CLI binary, interactive mode, slash commands | `Cli` (clap), `Commands` |
 
 ### 2.3 Data Flow
@@ -91,45 +95,52 @@ Stores messages, tool calls, session metadata. Resume with `anvil -c`.
 
 ```
 .anvil/
-├── config.toml     # Provider, agent, tool settings
-├── context.md      # Injected into system prompt (lessons learned, project info)
-├── models/         # Per-model sampling profiles (TOML)
-├── skills/         # Prompt template skills (Markdown + YAML frontmatter)
-└── memory/         # Reserved for future session memory
+├── config.toml          # Provider, agent, tool, MCP settings
+├── context.md           # Injected into system prompt (project info)
+├── achievements.json    # Unlocked badges (persisted across sessions)
+├── models/              # Per-model sampling profiles (TOML)
+├── skills/              # Prompt template skills (Markdown + YAML frontmatter)
+└── memory/              # Persistent learned patterns (categorized markdown)
 ```
 
 Created by `anvil init`. Never committed to git (in `.gitignore`).
 
 ---
 
-## 3. Current State (v0.1.0)
+## 3. Current State (v1.1.0)
 
 ### What's built and working
 
-- Interactive mode with readline-style input, streaming output, slash commands
-- 7 tools: `shell`, `file_read`, `file_write`, `file_edit`, `grep`, `ls`, `find`
+- Interactive mode with readline-style input, streaming output, 14 slash commands
+- 11 built-in tools: `shell`, `file_read`, `file_write`, `file_edit`, `grep`, `ls`, `find`, `git_status`, `git_diff`, `git_log`, `git_commit`
+- MCP (Model Context Protocol) client for external tool servers via JSON-RPC over stdio
 - Multi-backend support: Ollama, llama-server, MLX, Custom
 - Model profiles with auto-applied sampling parameters
-- Skills system with YAML frontmatter, env passthrough, verification commands
-- 14 bundled skills across infrastructure, dev-tools, and meta categories
+- Skills system with YAML frontmatter, env passthrough, verification commands, dependencies
+- 17 bundled skills across infrastructure, dev-tools, meta, and kids categories
 - Autonomous mode (Ralph Loop) with verification-based retry
-- Session persistence in SQLite with resume (`anvil -c`)
-- Auto-detect model on startup (queries backend for available models)
-- Retry with exponential backoff (Retryable vs Permanent error distinction)
-- Context window estimation with 80% warning
+- Session persistence in SQLite with resume (`anvil -c`), search, usage tracking
+- Context compaction via LLM-generated summaries (`/clear`)
+- Auto-compact when context usage exceeds configurable threshold
+- Ctrl+C cancellation of in-flight LLM requests and tool execution
+- Thinking mode parsing (`<think>` blocks from Qwen3/DeepSeek-R1) with `/think` toggle
+- Backend lifecycle management (`/backend start llama <model>`, `/backend stop`)
+- Model routing — route specific tools to different models (`/route`)
+- Plugin system — user-defined tools via TOML in `.anvil/plugins/`
+- Tool hooks — pre/post scripts for tool execution
+- Character personas — themed system prompt wrappers for fun mode (`/persona`)
+- Achievement system — 10 unlockable badges with persona-themed notifications
+- Categorized project memory with search (`/memory search`, `/memory add category:convention`)
+- Tool argument validation with actionable LLM error messages
+- File cache with invalidation on write/edit
 - Loop detection (hash-based, configurable limit)
 - Output truncation (tail-truncation by lines/bytes, temp file fallback)
-- 91 tests, 0 clippy warnings, 0 doc warnings
+- 228 tests, 0 clippy warnings, 0 doc warnings
 
-### What's deferred (see AGILE.md)
+### What's deferred
 
-- Context compaction (`/clear` is a placeholder)
-- Ctrl+C cancellation of in-flight LLM requests
-- Thinking mode parsing (`<think>` blocks from Qwen3/DeepSeek-R1)
-- Interactive Ralph Loop (`/ralph` command shows help only)
-- Backend lifecycle management (start/stop llama-server from Anvil)
-- Plugin/extension system
 - Windows native support (WSL works)
+- MCP server restart by name (requires config persistence refactor)
 
 ### Known issues
 
@@ -196,7 +207,7 @@ Examples from history:
 ```bash
 cargo build                          # debug build (~3s)
 cargo build --release                # release build (~9s, 13MB binary)
-cargo test                           # all 91 tests (~2s)
+cargo test                           # all 228 tests (~7s)
 cargo clippy --all-targets -- -D warnings
 cargo doc --no-deps                  # generate docs (zero warnings)
 ```
@@ -315,7 +326,7 @@ Before making any change, ask yourself:
 
 ## 8. Project Plan
 
-See [AGILE.md](AGILE.md) for the feature-driven roadmap from v0.1.1 to v1.0.
+See [AGILE.md](AGILE.md) for the feature roadmap.
 
 ---
 
@@ -341,20 +352,27 @@ The codebase produces zero doc warnings with `cargo doc --no-deps`.
 | File | What it does |
 |------|-------------|
 | `Cargo.toml` | Workspace root — all shared dependencies |
-| `crates/anvil/src/main.rs` | CLI entry point, clap args, auto-detect, Ralph Loop |
-| `crates/anvil/src/commands.rs` | Slash command handlers (/help, /model, /backend, /skill) |
+| `crates/anvil/src/main.rs` | CLI entry point, clap args, auto-detect, MCP init, Ralph Loop |
+| `crates/anvil/src/commands.rs` | 14 slash command handlers (/help, /model, /backend, /skill, /mcp, /persona, /memory, etc.) |
 | `crates/anvil/src/interactive.rs` | Readline loop, event processing, streaming display |
-| `crates/anvil-agent/src/agent.rs` | Agent::turn() — the core loop |
-| `crates/anvil-agent/src/skills.rs` | Skill parsing with YAML frontmatter |
+| `crates/anvil-agent/src/agent.rs` | Agent::turn() — the core loop with MCP tool dispatch |
+| `crates/anvil-agent/src/skills.rs` | Skill parsing with YAML frontmatter and dependencies |
 | `crates/anvil-agent/src/autonomous.rs` | Ralph Loop runner and verification |
+| `crates/anvil-agent/src/persona.rs` | Character personas (Sparkle, Bolt, Codebeard) |
+| `crates/anvil-agent/src/achievements.rs` | Achievement system with session tracking |
+| `crates/anvil-agent/src/memory.rs` | Categorized project memory with search |
 | `crates/anvil-agent/src/system_prompt.rs` | System prompt builder (reads this file) |
 | `crates/anvil-config/src/profiles.rs` | Model profiles, sampling config, matching |
 | `crates/anvil-config/src/provider.rs` | BackendKind enum, ProviderConfig |
-| `crates/anvil-config/src/bundled_skills.rs` | 14 bundled skill file contents |
+| `crates/anvil-config/src/settings.rs` | Settings struct including MCP config |
+| `crates/anvil-config/src/bundled_skills.rs` | 17 bundled skill file contents |
 | `crates/anvil-llm/src/client.rs` | LlmClient — HTTP, streaming, retry, sampling injection |
 | `crates/anvil-llm/src/stream.rs` | SSE parsing, ToolCallAccumulator |
-| `crates/anvil-tools/src/tools.rs` | Tool implementations (shell, file_read, etc.) |
-| `crates/anvil-tools/src/executor.rs` | Tool dispatch, env passthrough |
+| `crates/anvil-mcp/src/manager.rs` | MCP server manager — spawn, discover, dispatch, shutdown |
+| `crates/anvil-tools/src/tools.rs` | 11 tool implementations (shell, file_read, git_status, etc.) |
+| `crates/anvil-tools/src/executor.rs` | Tool dispatch, validation, env passthrough |
+| `crates/anvil-tools/src/plugins.rs` | User-defined tools via TOML plugin files |
+| `crates/anvil-tools/src/hooks.rs` | Pre/post tool execution hooks |
 | `LESSONS_LEARNED.md` | What worked, what didn't, patterns to reuse |
 | `MANUAL.md` | User-facing usage guide |
-| `AGILE.md` | Feature roadmap v0.1.1 → v1.0 |
+| `AGILE.md` | Feature roadmap |
