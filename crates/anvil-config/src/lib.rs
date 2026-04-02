@@ -30,7 +30,7 @@ pub use bundled_skills::BUNDLED_SKILLS;
 pub use inventory::{load_inventory, Inventory};
 pub use profiles::{
     find_matching_profile, load_bundled_profiles, load_profiles, profiles_dir, BackendHints,
-    ContextConfig, ModelProfile, SamplingConfig, BUNDLED_PROFILES,
+    Capabilities, ContextConfig, ModelProfile, SamplingConfig, BUNDLED_PROFILES,
 };
 pub use provider::{BackendKind, PricingConfig, ProviderConfig};
 pub use settings::Settings;

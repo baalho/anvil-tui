@@ -54,6 +54,7 @@ pub async fn handle_command(
         "/clear" => CommandResult::Compact,
         "/think" => CommandResult::Handled(think_command(agent)),
         "/memory" => CommandResult::Handled(memory_command(agent, arg)),
+        "/mode" => CommandResult::Handled(mode_command(agent, arg)),
         "/route" => CommandResult::Handled(route_command(agent, arg)),
         "/skill" => CommandResult::Handled(skill_command(agent, arg)),
         "/mcp" => CommandResult::Handled(mcp_command(agent, arg).await),
@@ -79,6 +80,7 @@ fn help_text() -> String {
             "Model & Backend",
             &[
                 ("/model [name]", "Show or switch model"),
+                ("/mode [coding|creative]", "Show or switch mode"),
                 ("/backend [type url]", "Show or switch backend"),
                 ("/backend start llama <model>", "Start managed llama-server"),
                 ("/backend stop", "Stop managed backend"),
@@ -140,6 +142,31 @@ fn help_text() -> String {
         out.pop();
     }
     out
+}
+
+fn mode_command(agent: &mut Agent, arg: &str) -> String {
+    use anvil_agent::Mode;
+
+    if arg.is_empty() {
+        let mode = agent.mode();
+        let desc = match mode {
+            Mode::Coding => "tools available, model decides when to use them",
+            Mode::Creative => "tools disabled, model responds directly",
+        };
+        return format!("mode: {mode} ({desc})");
+    }
+
+    match arg.to_lowercase().as_str() {
+        "coding" | "code" => {
+            agent.set_mode(Mode::Coding);
+            "mode: coding ⚒ (tools available)".to_string()
+        }
+        "creative" | "create" => {
+            agent.set_mode(Mode::Creative);
+            "mode: creative ✨ (direct output, no tools)".to_string()
+        }
+        _ => "usage: /mode [coding|creative]".to_string(),
+    }
 }
 
 fn route_command(agent: &mut Agent, arg: &str) -> String {
@@ -472,6 +499,7 @@ fn stats_text(agent: &Agent, usage: &TokenUsage) -> String {
     let mut text = format!(
         "session:     {}\n\
          model:       {}\n\
+         mode:        {}\n\
          backend:     {}\n\
          messages:    {msg_count}\n\
          requests:    {}\n\
@@ -479,6 +507,7 @@ fn stats_text(agent: &Agent, usage: &TokenUsage) -> String {
          cost:        {cost_str}",
         &agent.session_id()[..8],
         agent.model(),
+        agent.mode(),
         agent.backend(),
         u.request_count,
         u.prompt_tokens,
@@ -540,7 +569,15 @@ async fn model_command(agent: &mut Agent, arg: &str) -> String {
                 let marker = if *model == agent.model() { " *" } else { "" };
                 let profile_tag =
                     if let Some(p) = anvil_config::find_matching_profile(&profiles, model) {
-                        format!("  ({})", p.name)
+                        if p.capabilities.strengths.is_empty() {
+                            format!("  ({})", p.name)
+                        } else {
+                            format!(
+                                "  ({} — {})",
+                                p.name,
+                                p.capabilities.strengths.join(", ")
+                            )
+                        }
                     } else {
                         String::new()
                     };

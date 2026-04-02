@@ -12,7 +12,7 @@ Single source of truth for AI agents working in this codebase.
 - **Repo**: https://github.com/baalho/anvil-tui
 - **License**: Apache-2.0
 - **Rust**: edition 2021, MSRV 1.75
-- **Version**: 1.4.0
+- **Version**: 1.5.0
 - **Platforms**: macOS, Linux, Windows/WSL
 - **Default model**: `qwen3-coder:30b` (Ollama)
 
@@ -39,11 +39,11 @@ anvil-config ──┬──► anvil-llm ──┐
 | Crate | Purpose |
 |-------|---------|
 | `anvil-config` | Settings, `.anvil/` harness, model profiles, bundled skills, inventory |
-| `anvil-llm` | HTTP client, SSE streaming, retry, sampling injection |
-| `anvil-tools` | 11 tools, executor, permissions, plugins, hooks, truncation |
+| `anvil-llm` | HTTP client, SSE streaming, retry, sampling injection, tool_choice |
+| `anvil-tools` | 11 tools, executor, permissions, plugins, hooks, truncation, ToolOutput |
 | `anvil-mcp` | MCP client — JSON-RPC over stdio |
-| `anvil-agent` | Agent loop, skills, personas, achievements, sessions, autonomous mode |
-| `anvil` | CLI binary, interactive mode, 15 slash commands |
+| `anvil-agent` | Agent loop, skills, personas, modes, achievements, sessions, autonomous mode |
+| `anvil` | CLI binary, interactive mode, 16 slash commands, Renderer trait |
 
 ### Key abstractions
 
@@ -51,7 +51,14 @@ anvil-config ──┬──► anvil-llm ──┐
 Controls model discovery endpoint (`/api/tags` vs `/v1/models`).
 
 **Model Profiles** (`profiles.rs`): TOML in `.anvil/models/` with sampling,
-context, and backend hints. Matched by case-insensitive substring.
+context, backend hints, and capability tags. Matched by case-insensitive substring.
+
+**Mode** (`mode.rs`): `Coding` or `Creative`. Controls `tool_choice` in API
+requests and whether tools are sent. Personas auto-set mode (kids → Creative,
+homelab → Coding). User overrides with `/mode`.
+
+**ToolChoice** (`message.rs`): `auto`, `none`, `required`, or specific function.
+Sent in every `ChatRequest` to tell the model whether to use tools.
 
 **Skills** (`skills.rs`): Markdown + YAML frontmatter. Injected into system
 prompt when activated. Env vars declared in frontmatter pass through to shell.
@@ -65,6 +72,9 @@ tokens, wall-clock time.
 
 **Model Routing** (`/route`): Route specific tools to different models.
 Use small models for grep/ls, large models for code generation.
+
+**Renderer** (`render.rs`): Trait for output rendering. `TerminalRenderer`
+handles text. Future renderers add image display (Kitty/Sixel), web UI, etc.
 
 ### Harness directory
 
@@ -120,6 +130,8 @@ These prevent real bugs. Don't violate them.
 - **GLM-4.7-Flash**: Use llama-server with `--jinja`. Set `repeat_penalty = 1.0`.
 - **Don't assume model capabilities**: Test with smallest model you support.
 - **No DynTool trait**: A trait-based tool system was built and deleted. Simple match dispatch is enough.
+- **tool_choice is required**: Without `tool_choice: "auto"` in the API request, models may ignore tools and print code inline instead of using `file_write`.
+- **Modes over auto-detection**: Explicit `/mode coding|creative` is simpler and more reliable than trying to auto-detect intent from the user's prompt.
 
 ---
 
@@ -145,15 +157,17 @@ Before any change:
 | File | Purpose |
 |------|---------|
 | `crates/anvil/src/main.rs` | CLI entry, clap args, MCP init, Ralph Loop |
-| `crates/anvil/src/commands.rs` | 15 slash commands |
-| `crates/anvil/src/interactive.rs` | Readline loop, streaming display |
-| `crates/anvil-agent/src/agent.rs` | Agent::turn() core loop |
+| `crates/anvil/src/commands.rs` | 16 slash commands (including /mode) |
+| `crates/anvil/src/interactive.rs` | Readline loop, streaming display, status line |
+| `crates/anvil/src/render.rs` | Renderer trait, TerminalRenderer |
+| `crates/anvil-agent/src/agent.rs` | Agent::turn() core loop, mode-aware tool_choice |
+| `crates/anvil-agent/src/mode.rs` | Mode enum (Coding, Creative) |
 | `crates/anvil-agent/src/skills.rs` | Skill parsing, YAML frontmatter |
 | `crates/anvil-agent/src/autonomous.rs` | Ralph Loop runner |
 | `crates/anvil-agent/src/achievements.rs` | Badge system, session tracker |
 | `crates/anvil-agent/src/persona.rs` | 4 personas (sparkle, bolt, codebeard, homelab) |
-| `crates/anvil-agent/src/system_prompt.rs` | Layered prompt builder |
-| `crates/anvil-config/src/profiles.rs` | 9 model profiles |
+| `crates/anvil-agent/src/system_prompt.rs` | Layered prompt builder with tool-use guidance |
+| `crates/anvil-config/src/profiles.rs` | 9 model profiles with capability tags |
 | `crates/anvil-config/src/bundled_skills.rs` | 21 bundled skills |
 | `crates/anvil-config/src/inventory.rs` | Host/service inventory |
 | `crates/anvil-config/src/settings.rs` | Settings struct, MCP config |

@@ -5,6 +5,43 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [v1.5.0] — 2026-04-02 — Intent-Aware Edition
+
+### Added
+- **`tool_choice` parameter** — `ChatRequest` now sends `tool_choice`
+  to the LLM API. Coding mode sends `"auto"` (model decides when to
+  use tools), Creative mode sends `"none"` (model responds directly).
+  This fixes the core issue where models would print code inline
+  instead of using `file_write`.
+- **Mode system** (`mode.rs`) — `Coding` and `Creative` modes control
+  tool availability and response style. Coding mode sends all tools
+  with `tool_choice: "auto"`. Creative mode omits tools entirely so
+  the model responds directly (ASCII art, stories, explanations).
+- **`/mode` slash command** — `/mode coding` or `/mode creative` to
+  switch modes. `/mode` shows current mode. Personas auto-set mode:
+  kids personas (sparkle, bolt, codebeard) → Creative, homelab → Coding.
+- **Model profile capabilities** — `[capabilities]` section in model
+  profiles with `strengths` tags (coding, creative, reasoning,
+  tool-calling). Displayed by `/model` to help users pick the right
+  model for their task.
+- **Status line prompt** — prompt now shows `[mode|model]` with
+  persona name when active. Mode icon: ⚒ for coding, ✨ for creative,
+  persona-specific icons when a persona is active.
+- **Renderer trait** (`render.rs`) — output rendering pipeline with
+  `TerminalRenderer` implementation. Provides a seam for future
+  renderers (image display, web UI) without touching agent logic.
+- **`content_type` on ToolOutput::Structured** — hints the renderer
+  about output format ("text", "image", "svg", "table"). Groundwork
+  for future image generation support.
+- **Tool-use guidance in system prompt** — explicit "When to Use Tools
+  vs Respond Directly" section tells the model when to use `file_write`
+  vs respond inline.
+
+### Changed
+- `/stats` now shows current mode.
+- Banner shows mode at startup.
+- All 9 bundled model profiles now include `[capabilities]` tags.
+
 ## [v1.4.0] — 2026-04-02 — Sparkle Edition
 
 ### Added

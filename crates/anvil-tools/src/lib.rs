@@ -43,9 +43,12 @@ pub enum ToolOutput {
     /// Structured result with both human-readable text and machine-readable data.
     /// The `text` field goes into the LLM conversation; `data` is available
     /// to the UI layer for rendering (e.g., SVG paths, coordinate arrays).
+    /// `content_type` hints the renderer: "text", "image", "svg", "table".
     Structured {
         text: String,
         data: serde_json::Value,
+        /// Hint for the UI renderer. Defaults to "text".
+        content_type: String,
     },
 }
 
@@ -113,6 +116,7 @@ mod output_tests {
         let output = ToolOutput::Structured {
             text: "summary".to_string(),
             data: serde_json::json!({"x": 1, "y": 2}),
+            content_type: "text".to_string(),
         };
         assert_eq!(output.text(), "summary");
     }
@@ -122,6 +126,7 @@ mod output_tests {
         let output = ToolOutput::Structured {
             text: "consumed".to_string(),
             data: serde_json::json!(null),
+            content_type: "text".to_string(),
         };
         assert_eq!(output.into_text(), "consumed");
     }

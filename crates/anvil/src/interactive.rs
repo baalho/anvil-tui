@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::commands::{self, CommandResult};
+use crate::render::{Renderer, TerminalRenderer};
 
 /// Tracks Ctrl+C state for double-press exit detection.
 struct CtrlCState {
@@ -40,6 +41,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         println!();
     }
 
+    let renderer = TerminalRenderer::new();
     let stdin = io::stdin();
     let mut cumulative_usage = TokenUsage::default();
     let mut achievement_store = AchievementStore::load(agent.workspace());
@@ -92,6 +94,29 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         // Reset Ctrl+C state between turns
         ctrlc_state.pending.store(false, Ordering::SeqCst);
 
+        // Build status prefix: [persona?|mode|model] icon
+        let mode_icon = match agent.mode() {
+            anvil_agent::Mode::Coding => "⚒",
+            anvil_agent::Mode::Creative => "✨",
+        };
+        // Override icon if persona is active
+        let icon = match agent.persona().map(|p| p.key.as_str()) {
+            Some("sparkle") => "🦄",
+            Some("bolt") => "🤖",
+            Some("codebeard") => "🏴\u{200d}☠\u{fe0f}",
+            _ => mode_icon,
+        };
+        // Shorten model name for display (strip :latest, truncate long names)
+        let model_short = agent
+            .model()
+            .strip_suffix(":latest")
+            .unwrap_or(agent.model());
+        let status = if let Some(persona) = agent.persona() {
+            format!("[{}|{}|{}]", persona.key, agent.mode(), model_short)
+        } else {
+            format!("[{}|{}]", agent.mode(), model_short)
+        };
+
         // Show token usage in prompt when context is >50% full
         let context_window = agent.context_limit() as u64;
         let used_tokens = cumulative_usage.total_tokens;
@@ -104,8 +129,9 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         if usage_pct > 80 {
             execute!(
                 io::stdout(),
-                SetForegroundColor(Color::Green),
-                Print("you "),
+                SetForegroundColor(Color::DarkGrey),
+                Print(&status),
+                Print(" "),
                 SetForegroundColor(Color::Yellow),
                 Print(format!(
                     "[{}/{}k ⚠] ",
@@ -113,25 +139,32 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                     context_window / 1000
                 )),
                 SetForegroundColor(Color::Green),
-                Print("▸ "),
+                Print(format!("{icon} ▸ ")),
                 ResetColor,
             )?;
         } else if usage_pct > 50 {
             execute!(
                 io::stdout(),
+                SetForegroundColor(Color::DarkGrey),
+                Print(&status),
+                Print(" "),
                 SetForegroundColor(Color::Green),
                 Print(format!(
-                    "you [{}/{}k] ▸ ",
+                    "[{}/{}k] ",
                     format_token_count(used_tokens),
                     context_window / 1000
                 )),
+                Print(format!("{icon} ▸ ")),
                 ResetColor,
             )?;
         } else {
             execute!(
                 io::stdout(),
+                SetForegroundColor(Color::DarkGrey),
+                Print(&status),
+                Print(" "),
                 SetForegroundColor(Color::Green),
-                Print("you▸ "),
+                Print(format!("{icon} ▸ ")),
                 ResetColor,
             )?;
         }
@@ -459,8 +492,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         )?;
                         needs_newline = true;
                     }
-                    print!("{text}");
-                    io::stdout().flush()?;
+                    renderer.render_content_delta(&text);
                 }
                 AgentEvent::ToolCallPending {
                     name, arguments, ..
@@ -603,12 +635,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         println!();
                         needs_newline = false;
                     }
-                    execute!(
-                        io::stdout(),
-                        SetForegroundColor(Color::Red),
-                        Print(format!("error: {e}\n")),
-                        ResetColor,
-                    )?;
+                    renderer.render_error(&e);
                 }
             }
         }
@@ -676,6 +703,7 @@ fn print_banner(agent: &Agent) {
         println!("│  local coding agent                 │");
         println!("╰─────────────────────────────────────╯");
         println!("  model:   {}", agent.model());
+        println!("  mode:    {}", agent.mode());
         println!("  session: {}", &agent.session_id()[..8]);
         println!("  cwd:     {}", agent.workspace().display());
         println!("  type /help for commands");

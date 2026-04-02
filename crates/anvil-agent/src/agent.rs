@@ -1,3 +1,4 @@
+use crate::mode::Mode;
 use crate::routing::ModelRouter;
 use crate::session::{SessionStatus, SessionStore, ToolCallEntry};
 use crate::system_prompt::build_system_prompt;
@@ -94,6 +95,8 @@ pub struct Agent {
     mcp: Arc<McpManager>,
     /// Active character persona (fun mode).
     active_persona: Option<crate::persona::Persona>,
+    /// Operating mode — controls tool availability and response style.
+    mode: Mode,
 }
 
 impl Agent {
@@ -140,6 +143,7 @@ impl Agent {
             router: ModelRouter::new(),
             mcp,
             active_persona: None,
+            mode: Mode::default(),
         })
     }
 
@@ -220,6 +224,7 @@ impl Agent {
             router: ModelRouter::new(),
             mcp,
             active_persona: None,
+            mode: Mode::default(),
         })
     }
 
@@ -380,6 +385,7 @@ impl Agent {
                 ChatMessage::user(&compaction_prompt),
             ],
             tools: None,
+            tool_choice: None,
             temperature: Some(0.3),
             top_p: None,
             min_p: None,
@@ -502,6 +508,11 @@ impl Agent {
             prompt = format!("{}\n\n---\n\n{}", persona.prompt, prompt);
         }
 
+        // Append mode-specific suffix (e.g., Creative mode instructions)
+        if let Some(suffix) = self.mode.prompt_suffix() {
+            prompt.push_str(suffix);
+        }
+
         if let Some(first) = self.messages.first_mut() {
             if first.role == anvil_llm::Role::System {
                 first.content = Some(prompt);
@@ -560,6 +571,12 @@ impl Agent {
             self.executor.clear_kids_sandbox();
         }
 
+        // Set mode based on persona (kids → Creative, homelab → Coding)
+        self.mode = match &persona {
+            Some(p) => Mode::for_persona(&p.key),
+            None => Mode::default(),
+        };
+
         self.active_persona = persona;
         self.rebuild_system_prompt();
     }
@@ -567,6 +584,18 @@ impl Agent {
     /// Get the active persona, if any.
     pub fn persona(&self) -> Option<&crate::persona::Persona> {
         self.active_persona.as_ref()
+    }
+
+    /// Get the current operating mode.
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// Set the operating mode. Rebuilds the system prompt to include/exclude
+    /// the mode-specific suffix.
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+        self.rebuild_system_prompt();
     }
 
     pub fn context_limit(&self) -> usize {
@@ -683,17 +712,26 @@ impl Agent {
                 }
             }
 
-            // Merge built-in tool definitions with MCP server tools
-            let mut tool_defs = all_tool_definitions();
-            let mcp_defs = self.mcp.tool_definitions().await;
-            tool_defs.extend(mcp_defs);
-            let tools_json: Vec<anvil_llm::ToolDefinition> =
-                serde_json::from_value(serde_json::Value::Array(tool_defs))?;
+            // Build tools and tool_choice based on active mode.
+            // Creative mode omits tools entirely so the model responds directly.
+            // Coding mode sends all tools with tool_choice: "auto".
+            let (tools, tool_choice) = match self.mode {
+                Mode::Creative => (None, Some(anvil_llm::ToolChoice::none())),
+                Mode::Coding => {
+                    let mut tool_defs = all_tool_definitions();
+                    let mcp_defs = self.mcp.tool_definitions().await;
+                    tool_defs.extend(mcp_defs);
+                    let tools_json: Vec<anvil_llm::ToolDefinition> =
+                        serde_json::from_value(serde_json::Value::Array(tool_defs))?;
+                    (Some(tools_json), Some(anvil_llm::ToolChoice::auto()))
+                }
+            };
 
             let mut request = ChatRequest {
                 model: String::new(), // filled by client
                 messages: self.messages.clone(),
-                tools: Some(tools_json),
+                tools,
+                tool_choice,
                 temperature: None,
                 top_p: None,
                 min_p: None,

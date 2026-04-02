@@ -259,3 +259,91 @@ pub struct ToolParameterProperty {
     pub prop_type: String,
     pub description: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_choice_auto_serializes_as_string() {
+        let choice = ToolChoice::auto();
+        let json = serde_json::to_value(&choice).unwrap();
+        assert_eq!(json, serde_json::json!("auto"));
+    }
+
+    #[test]
+    fn tool_choice_none_serializes_as_string() {
+        let choice = ToolChoice::none();
+        let json = serde_json::to_value(&choice).unwrap();
+        assert_eq!(json, serde_json::json!("none"));
+    }
+
+    #[test]
+    fn tool_choice_required_serializes_as_string() {
+        let choice = ToolChoice::required();
+        let json = serde_json::to_value(&choice).unwrap();
+        assert_eq!(json, serde_json::json!("required"));
+    }
+
+    #[test]
+    fn tool_choice_function_serializes_as_object() {
+        let choice = ToolChoice::function("file_write");
+        let json = serde_json::to_value(&choice).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "function", "function": {"name": "file_write"}})
+        );
+    }
+
+    #[test]
+    fn tool_choice_auto_roundtrips() {
+        let choice = ToolChoice::auto();
+        let json = serde_json::to_string(&choice).unwrap();
+        let back: ToolChoice = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, choice);
+    }
+
+    #[test]
+    fn tool_choice_function_roundtrips() {
+        let choice = ToolChoice::function("shell");
+        let json = serde_json::to_string(&choice).unwrap();
+        let back: ToolChoice = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, choice);
+    }
+
+    #[test]
+    fn chat_request_omits_tool_choice_when_none() {
+        let request = ChatRequest {
+            model: "test".to_string(),
+            messages: vec![],
+            tools: None,
+            tool_choice: None,
+            temperature: None,
+            top_p: None,
+            min_p: None,
+            repeat_penalty: None,
+            top_k: None,
+            stream: false,
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("tool_choice"));
+    }
+
+    #[test]
+    fn chat_request_includes_tool_choice_when_set() {
+        let request = ChatRequest {
+            model: "test".to_string(),
+            messages: vec![],
+            tools: None,
+            tool_choice: Some(ToolChoice::auto()),
+            temperature: None,
+            top_p: None,
+            min_p: None,
+            repeat_penalty: None,
+            top_k: None,
+            stream: false,
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["tool_choice"], serde_json::json!("auto"));
+    }
+}

@@ -61,6 +61,22 @@ pub struct ModelProfile {
     /// Backend-specific hints (which server works best, launch flags).
     #[serde(default)]
     pub backend: BackendHints,
+    /// What this model is good at. Metadata for `/model` display and
+    /// future auto-selection. Missing section is fine (backward compatible).
+    #[serde(default)]
+    pub capabilities: Capabilities,
+}
+
+/// What a model is good at — metadata for display and future auto-routing.
+///
+/// Strengths are free-form strings like "coding", "creative", "reasoning",
+/// "tool-calling". Displayed by `/model` so users can pick the right model
+/// for their task. Future versions may use these for automatic mode→model mapping.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Capabilities {
+    /// What this model excels at (e.g. ["coding", "tool-calling"]).
+    #[serde(default)]
+    pub strengths: Vec<String>,
 }
 
 /// Sampling parameters injected into chat completion requests.
@@ -243,6 +259,9 @@ default_window = 32768
 [backend]
 preferred = "ollama"
 notes = "Works well with Ollama. For 256K context, ensure sufficient memory."
+
+[capabilities]
+strengths = ["coding", "tool-calling"]
 "#,
     ),
     (
@@ -266,6 +285,9 @@ default_window = 16384
 
 [backend]
 preferred = "ollama"
+
+[capabilities]
+strengths = ["creative", "reasoning", "tool-calling"]
 "#,
     ),
     (
@@ -290,6 +312,9 @@ default_window = 16384
 [backend]
 preferred = "ollama"
 notes = "Use temperature 0.3 for reliable tool calling and file generation."
+
+[capabilities]
+strengths = ["coding", "tool-calling"]
 "#,
     ),
     (
@@ -312,6 +337,9 @@ default_window = 16384
 
 [backend]
 preferred = "ollama"
+
+[capabilities]
+strengths = ["creative", "reasoning", "tool-calling"]
 "#,
     ),
     (
@@ -335,6 +363,9 @@ default_window = 16384
 [backend]
 preferred = "ollama"
 notes = "Apache 2.0 license. Use llama-server with --jinja for best results."
+
+[capabilities]
+strengths = ["coding", "tool-calling"]
 "#,
     ),
     (
@@ -359,6 +390,9 @@ default_window = 16384
 [backend]
 preferred = "ollama"
 notes = "Reasoning model — outputs <think> blocks before answering. MIT license."
+
+[capabilities]
+strengths = ["reasoning", "coding"]
 "#,
     ),
     (
@@ -387,6 +421,9 @@ default_window = 32768
 preferred = "llama-server"
 flags = ["--jinja"]
 notes = "No Ollama GGUF support yet (mmproj vision files). Use llama-server with --jinja."
+
+[capabilities]
+strengths = ["creative", "reasoning", "coding", "tool-calling"]
 "#,
     ),
     (
@@ -411,6 +448,9 @@ default_window = 32768
 [backend]
 preferred = "ollama"
 notes = "Supports thinking mode and tool calling. Strong reasoning and agentic capabilities."
+
+[capabilities]
+strengths = ["reasoning", "coding", "tool-calling"]
 "#,
     ),
     (
@@ -437,6 +477,9 @@ default_window = 16384
 preferred = "llama-server"
 flags = ["--jinja"]
 notes = "Unsloth warns against Ollama due to chat template bugs. Use llama-server with --jinja."
+
+[capabilities]
+strengths = ["creative", "tool-calling"]
 "#,
     ),
 ];

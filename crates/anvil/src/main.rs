@@ -1,6 +1,7 @@
 mod backend;
 mod commands;
 mod interactive;
+pub mod render;
 
 use anvil_agent::{Agent, AgentEvent, McpManager, McpServerConfig, SessionStore};
 use anvil_config::{data_dir, load_settings, Settings};

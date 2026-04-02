@@ -91,6 +91,7 @@ fn empty_request() -> anvil_llm::ChatRequest {
         }],
         stream: false,
         tools: None,
+        tool_choice: None,
         temperature: None,
         top_p: None,
         min_p: None,
