@@ -1,9 +1,10 @@
 //! Top-level settings loaded from `.anvil/config.toml`.
 //!
-//! Settings are organized into three sections:
+//! Settings are organized into sections:
 //! - `[provider]` — which backend to connect to and which model to use
 //! - `[agent]` — context window, loop detection, token limits
 //! - `[tools]` — shell timeout, output truncation limits
+//! - `[[profiles]]` — named launch profiles bundling persona + mode + skills + model
 
 use crate::provider::ProviderConfig;
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,32 @@ pub struct Settings {
     /// MCP (Model Context Protocol) server configuration.
     #[serde(default)]
     pub mcp: McpSettings,
+    /// Named launch profiles — bundle persona + mode + skills + model into
+    /// a single `anvil --profile <name>` flag.
+    #[serde(default)]
+    pub profiles: Vec<LaunchProfile>,
+}
+
+/// A named launch profile that bundles startup configuration.
+///
+/// Profiles let users skip manual `/persona`, `/mode`, `/skill`, `/model`
+/// commands at startup. `anvil --profile sparkle` applies everything at once.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaunchProfile {
+    /// Profile name used with `--profile` flag.
+    pub name: String,
+    /// Persona to activate (empty string = no persona).
+    #[serde(default)]
+    pub persona: String,
+    /// Mode to set ("coding" or "creative"). Defaults to mode implied by persona.
+    #[serde(default)]
+    pub mode: String,
+    /// Skills to activate by key.
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Model to use (overrides provider.model).
+    #[serde(default)]
+    pub model: String,
 }
 
 /// MCP server configuration — connects to external tool servers.
@@ -150,4 +177,51 @@ fn default_output_limit() -> usize {
 }
 fn default_auto_compact_threshold() -> u8 {
     90
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_settings_with_profiles() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "sparkle"
+            persona = "sparkle"
+            mode = "creative"
+            skills = ["cool-stuff", "story-mode"]
+            model = "qwen3:30b"
+
+            [[profiles]]
+            name = "code"
+            mode = "coding"
+            model = "qwen3-coder:30b"
+        "#;
+        let settings: Settings = toml::from_str(toml_str).unwrap();
+        assert_eq!(settings.profiles.len(), 2);
+        assert_eq!(settings.profiles[0].name, "sparkle");
+        assert_eq!(settings.profiles[0].persona, "sparkle");
+        assert_eq!(settings.profiles[0].mode, "creative");
+        assert_eq!(settings.profiles[0].skills, vec!["cool-stuff", "story-mode"]);
+        assert_eq!(settings.profiles[1].name, "code");
+        assert!(settings.profiles[1].persona.is_empty());
+    }
+
+    #[test]
+    fn empty_profiles_is_default() {
+        let settings = Settings::default();
+        assert!(settings.profiles.is_empty());
+    }
+
+    #[test]
+    fn settings_without_profiles_parses() {
+        let toml_str = r#"
+            [provider]
+            model = "test-model"
+        "#;
+        let settings: Settings = toml::from_str(toml_str).unwrap();
+        assert!(settings.profiles.is_empty());
+        assert_eq!(settings.provider.model, "test-model");
+    }
 }

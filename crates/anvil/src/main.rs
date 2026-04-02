@@ -30,6 +30,10 @@ struct Cli {
     /// Resume the most recent session, or a specific session by ID prefix
     #[arg(short = 'c', long = "continue")]
     continue_session: Option<Option<String>>,
+
+    /// Launch profile name (bundles persona + mode + skills + model)
+    #[arg(short = 'p', long = "profile")]
+    profile: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -141,6 +145,13 @@ async fn main() -> Result<()> {
                 agent.apply_model_profile(profile);
             }
 
+            // Apply launch profile if --profile was given
+            if let Some(profile_name) = &cli.profile {
+                apply_launch_profile(&mut agent, &settings, profile_name)?;
+                // Remember this profile for next time
+                let _ = anvil_config::save_last_profile(profile_name);
+            }
+
             // Warn if Ollama backend without OLLAMA_NUM_CTX set
             if matches!(agent.backend(), anvil_config::BackendKind::Ollama)
                 && std::env::var("OLLAMA_NUM_CTX").is_err()
@@ -172,6 +183,77 @@ fn cmd_init(workspace: &Path) -> Result<()> {
     println!("  Fun mode for kids:");
     println!("    Type /persona sparkle — activates Sparkle + kids mode automatically!");
     println!("    Then just tell Sparkle what you like and watch the magic happen 🦄");
+    Ok(())
+}
+
+/// Apply a named launch profile — sets persona, mode, skills, and model in one shot.
+fn apply_launch_profile(
+    agent: &mut Agent,
+    settings: &Settings,
+    profile_name: &str,
+) -> Result<()> {
+    let profile = settings
+        .profiles
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(profile_name))
+        .ok_or_else(|| {
+            let available: Vec<&str> = settings.profiles.iter().map(|p| p.name.as_str()).collect();
+            if available.is_empty() {
+                anyhow::anyhow!(
+                    "no profile '{}' found. Add [[profiles]] to .anvil/config.toml",
+                    profile_name
+                )
+            } else {
+                anyhow::anyhow!(
+                    "no profile '{}'. available: {}",
+                    profile_name,
+                    available.join(", ")
+                )
+            }
+        })?;
+
+    // Apply model if specified
+    if !profile.model.is_empty() {
+        agent.set_model(profile.model.clone());
+        // Re-apply model profile sampling for the new model
+        let model_profiles = anvil_config::load_bundled_profiles();
+        if let Some(mp) = anvil_config::find_matching_profile(&model_profiles, &profile.model) {
+            agent.apply_model_profile(mp);
+        }
+    }
+
+    // Apply persona if specified
+    if !profile.persona.is_empty() {
+        if let Some(persona) = anvil_agent::find_persona(&profile.persona) {
+            agent.set_persona(Some(persona));
+        } else {
+            eprintln!("  ⚠ profile '{}': unknown persona '{}'", profile.name, profile.persona);
+        }
+    }
+
+    // Apply mode if specified (overrides persona's default)
+    if !profile.mode.is_empty() {
+        match profile.mode.to_lowercase().as_str() {
+            "coding" | "code" => agent.set_mode(anvil_agent::Mode::Coding),
+            "creative" | "create" => agent.set_mode(anvil_agent::Mode::Creative),
+            _ => eprintln!("  ⚠ profile '{}': unknown mode '{}'", profile.name, profile.mode),
+        }
+    }
+
+    // Activate skills
+    for skill_key in &profile.skills {
+        let loader = anvil_agent::SkillLoader::new(agent.workspace());
+        if let Ok(skills) = loader.load_all() {
+            if let Some(skill) = skills.into_iter().find(|s| s.key.eq_ignore_ascii_case(skill_key))
+            {
+                agent.activate_skill(skill);
+            } else {
+                eprintln!("  ⚠ profile '{}': unknown skill '{}'", profile.name, skill_key);
+            }
+        }
+    }
+
+    eprintln!("  profile: {} loaded", profile.name);
     Ok(())
 }
 

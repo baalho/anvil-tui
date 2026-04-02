@@ -33,7 +33,7 @@ pub use profiles::{
     Capabilities, ContextConfig, ModelProfile, SamplingConfig, BUNDLED_PROFILES,
 };
 pub use provider::{BackendKind, PricingConfig, ProviderConfig};
-pub use settings::Settings;
+pub use settings::{LaunchProfile, Settings};
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -96,7 +96,23 @@ pub fn init_harness(dir: &Path) -> Result<PathBuf> {
     let config_path = harness.join(CONFIG_FILE);
     if !config_path.exists() {
         let defaults = Settings::default();
-        let content = toml::to_string_pretty(&defaults)?;
+        let mut content = toml::to_string_pretty(&defaults)?;
+        // Append example profiles as comments
+        content.push_str(
+            "\n\n# Launch profiles — use with: anvil --profile <name>\n\
+             # [[profiles]]\n\
+             # name = \"sparkle\"\n\
+             # persona = \"sparkle\"\n\
+             # mode = \"creative\"\n\
+             # skills = [\"cool-stuff\", \"story-mode\"]\n\
+             # model = \"qwen3:30b\"\n\
+             #\n\
+             # [[profiles]]\n\
+             # name = \"code\"\n\
+             # mode = \"coding\"\n\
+             # skills = [\"git-workflow\"]\n\
+             # model = \"qwen3-coder:30b\"\n",
+        );
         std::fs::write(&config_path, content)?;
     }
 
@@ -149,6 +165,34 @@ pub fn data_dir() -> Result<PathBuf> {
     let anvil_dir = data.join("anvil");
     std::fs::create_dir_all(&anvil_dir)?;
     Ok(anvil_dir)
+}
+
+/// Save the last-used profile name so it can be offered on next launch.
+pub fn save_last_profile(name: &str) -> Result<()> {
+    let dir = data_dir()?;
+    let content = format!(
+        "name = \"{}\"\ntimestamp = \"{}\"\n",
+        name,
+        chrono::Utc::now().to_rfc3339()
+    );
+    std::fs::write(dir.join("last_profile.toml"), content)?;
+    Ok(())
+}
+
+/// Load the last-used profile name and when it was used.
+/// Returns `None` if no profile was previously used.
+pub fn load_last_profile() -> Option<(String, String)> {
+    let dir = data_dir().ok()?;
+    let path = dir.join("last_profile.toml");
+    let content = std::fs::read_to_string(path).ok()?;
+    let table: toml::Table = content.parse().ok()?;
+    let name = table.get("name")?.as_str()?.to_string();
+    let timestamp = table
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    Some((name, timestamp))
 }
 
 /// Default context.md content with lessons-learned self-prompt.

@@ -12,7 +12,7 @@ Single source of truth for AI agents working in this codebase.
 - **Repo**: https://github.com/baalho/anvil-tui
 - **License**: Apache-2.0
 - **Rust**: edition 2021, MSRV 1.75
-- **Version**: 1.5.0
+- **Version**: 1.6.0
 - **Platforms**: macOS, Linux, Windows/WSL
 - **Default model**: `qwen3-coder:30b` (Ollama)
 
@@ -43,7 +43,7 @@ anvil-config ──┬──► anvil-llm ──┐
 | `anvil-tools` | 11 tools, executor, permissions, plugins, hooks, truncation, ToolOutput |
 | `anvil-mcp` | MCP client — JSON-RPC over stdio |
 | `anvil-agent` | Agent loop, skills, personas, modes, achievements, sessions, autonomous mode |
-| `anvil` | CLI binary, interactive mode, 16 slash commands, Renderer trait |
+| `anvil` | CLI binary, interactive mode, 17 slash commands, Renderer trait, launch profiles |
 
 ### Key abstractions
 
@@ -75,6 +75,14 @@ Use small models for grep/ls, large models for code generation.
 
 **Renderer** (`render.rs`): Trait for output rendering. `TerminalRenderer`
 handles text. Future renderers add image display (Kitty/Sixel), web UI, etc.
+
+**Launch Profiles** (`settings.rs`): `[[profiles]]` in config.toml bundle
+persona + mode + skills + model into `anvil --profile <name>`. Last-used
+profile remembered across sessions.
+
+**Project Detection** (`system_prompt.rs`): Auto-detects Rust, Node.js,
+Python, Go, Docker from workspace files. Injected into system prompt so
+the model knows the project type without being told.
 
 ### Harness directory
 
@@ -132,6 +140,8 @@ These prevent real bugs. Don't violate them.
 - **No DynTool trait**: A trait-based tool system was built and deleted. Simple match dispatch is enough.
 - **tool_choice is required**: Without `tool_choice: "auto"` in the API request, models may ignore tools and print code inline instead of using `file_write`.
 - **Modes over auto-detection**: Explicit `/mode coding|creative` is simpler and more reliable than trying to auto-detect intent from the user's prompt.
+- **Profiles over manual setup**: Kids can't type `/persona sparkle` + `/mode creative` + `/skill cool-stuff`. One `anvil -p sparkle` flag does everything.
+- **Project detection is lightweight**: Only check file existence, don't parse contents. The model needs a hint ("Rust project"), not a full analysis.
 
 ---
 
@@ -157,7 +167,7 @@ Before any change:
 | File | Purpose |
 |------|---------|
 | `crates/anvil/src/main.rs` | CLI entry, clap args, MCP init, Ralph Loop |
-| `crates/anvil/src/commands.rs` | 16 slash commands (including /mode) |
+| `crates/anvil/src/commands.rs` | 17 slash commands (including /mode, /selftest) |
 | `crates/anvil/src/interactive.rs` | Readline loop, streaming display, status line |
 | `crates/anvil/src/render.rs` | Renderer trait, TerminalRenderer |
 | `crates/anvil-agent/src/agent.rs` | Agent::turn() core loop, mode-aware tool_choice |

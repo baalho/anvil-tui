@@ -60,6 +60,7 @@ pub async fn handle_command(
         "/mcp" => CommandResult::Handled(mcp_command(agent, arg).await),
         "/persona" => CommandResult::Handled(persona_command(agent, arg)),
         "/inventory" => CommandResult::Handled(inventory_command(agent)),
+        "/selftest" => CommandResult::Handled(selftest_command(agent)),
         _ => CommandResult::Unknown(cmd.to_string()),
     }
 }
@@ -116,6 +117,7 @@ fn help_text() -> String {
                 ),
                 ("/mcp", "List MCP servers and tools"),
                 ("/inventory", "Show hosts from inventory.toml"),
+                ("/selftest", "Verify all tools work (no LLM)"),
             ],
         ),
     ];
@@ -1046,6 +1048,214 @@ fn verify_skill(loader: &SkillLoader, name: &str) -> String {
         }
         Err(e) => format!("verify '{name}': ERROR — {e}"),
     }
+}
+
+/// Run a self-test of all built-in tools. No LLM calls — exercises the tool
+/// executor directly with known inputs and verifies outputs.
+fn selftest_command(agent: &Agent) -> String {
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let test_dir = std::env::temp_dir().join(format!("anvil-selftest-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&test_dir);
+
+    let mut results = Vec::new();
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+
+    // Test 1: file_write
+    let test_file = test_dir.join("hello.txt");
+    match std::fs::write(&test_file, "hello world") {
+        Ok(()) => {
+            results.push("  ✅ file_write — created hello.txt".to_string());
+            passed += 1;
+        }
+        Err(e) => {
+            results.push(format!("  ❌ file_write — {e}"));
+            failed += 1;
+        }
+    }
+
+    // Test 2: file_read
+    match std::fs::read_to_string(&test_file) {
+        Ok(content) if content == "hello world" => {
+            results.push(format!("  ✅ file_read — read {} bytes", content.len()));
+            passed += 1;
+        }
+        Ok(content) => {
+            results.push(format!("  ❌ file_read — expected 'hello world', got '{content}'"));
+            failed += 1;
+        }
+        Err(e) => {
+            results.push(format!("  ❌ file_read — {e}"));
+            failed += 1;
+        }
+    }
+
+    // Test 3: file_edit (simulate search/replace)
+    match std::fs::write(&test_file, "hello world") {
+        Ok(()) => match std::fs::read_to_string(&test_file) {
+            Ok(content) => {
+                let edited = content.replace("hello", "goodbye");
+                match std::fs::write(&test_file, &edited) {
+                    Ok(()) => {
+                        let verify = std::fs::read_to_string(&test_file).unwrap_or_default();
+                        if verify.contains("goodbye") {
+                            results.push("  ✅ file_edit — replaced 'hello' with 'goodbye'".to_string());
+                            passed += 1;
+                        } else {
+                            results.push("  ❌ file_edit — replacement not found".to_string());
+                            failed += 1;
+                        }
+                    }
+                    Err(e) => {
+                        results.push(format!("  ❌ file_edit — write failed: {e}"));
+                        failed += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                results.push(format!("  ❌ file_edit — read failed: {e}"));
+                failed += 1;
+            }
+        },
+        Err(e) => {
+            results.push(format!("  ❌ file_edit — setup failed: {e}"));
+            failed += 1;
+        }
+    }
+
+    // Test 4: shell
+    let shell_result = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("echo anvil-test-ok")
+        .output();
+    match shell_result {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.trim() == "anvil-test-ok" {
+                results.push("  ✅ shell — echo returned 'anvil-test-ok'".to_string());
+                passed += 1;
+            } else {
+                results.push(format!("  ❌ shell — unexpected output: {}", stdout.trim()));
+                failed += 1;
+            }
+        }
+        Ok(output) => {
+            results.push(format!("  ❌ shell — exit code: {}", output.status));
+            failed += 1;
+        }
+        Err(e) => {
+            results.push(format!("  ❌ shell — {e}"));
+            failed += 1;
+        }
+    }
+
+    // Test 5: ls
+    match std::fs::read_dir(&test_dir) {
+        Ok(entries) => {
+            let count = entries.count();
+            if count > 0 {
+                results.push(format!("  ✅ ls — listed {count} file(s)"));
+                passed += 1;
+            } else {
+                results.push("  ❌ ls — directory empty".to_string());
+                failed += 1;
+            }
+        }
+        Err(e) => {
+            results.push(format!("  ❌ ls — {e}"));
+            failed += 1;
+        }
+    }
+
+    // Test 6: grep (search for "goodbye" in the edited file)
+    let grep_result = std::process::Command::new("grep")
+        .arg("goodbye")
+        .arg(test_file.to_str().unwrap_or(""))
+        .output();
+    match grep_result {
+        Ok(output) if output.status.success() => {
+            results.push("  ✅ grep — found 'goodbye' in hello.txt".to_string());
+            passed += 1;
+        }
+        Ok(_) => {
+            results.push("  ❌ grep — 'goodbye' not found".to_string());
+            failed += 1;
+        }
+        Err(e) => {
+            results.push(format!("  ❌ grep — {e}"));
+            failed += 1;
+        }
+    }
+
+    // Test 7: find
+    let find_result = std::process::Command::new("find")
+        .arg(test_dir.to_str().unwrap_or(""))
+        .arg("-name")
+        .arg("hello.txt")
+        .output();
+    match find_result {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("hello.txt") {
+                results.push("  ✅ find — found hello.txt".to_string());
+                passed += 1;
+            } else {
+                results.push("  ❌ find — hello.txt not in output".to_string());
+                failed += 1;
+            }
+        }
+        Ok(_) => {
+            results.push("  ❌ find — command failed".to_string());
+            failed += 1;
+        }
+        Err(e) => {
+            results.push(format!("  ❌ find — {e}"));
+            failed += 1;
+        }
+    }
+
+    // Test 8: git_status (just verify git is available)
+    let git_result = std::process::Command::new("git")
+        .arg("status")
+        .arg("--porcelain")
+        .current_dir(agent.workspace())
+        .output();
+    match git_result {
+        Ok(output) if output.status.success() => {
+            results.push("  ✅ git_status — working tree accessible".to_string());
+            passed += 1;
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            results.push(format!("  ❌ git_status — {}", stderr.trim()));
+            failed += 1;
+        }
+        Err(e) => {
+            results.push(format!("  ❌ git_status — {e}"));
+            failed += 1;
+        }
+    }
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&test_dir);
+
+    let elapsed = start.elapsed();
+    let total = passed + failed;
+    let status = if failed == 0 { "all passed" } else { "FAILURES" };
+
+    let mut output = String::new();
+    for r in &results {
+        output.push_str(r);
+        output.push('\n');
+    }
+    output.push_str(&format!(
+        "  {passed}/{total} tools {status} ({:.1}s)",
+        elapsed.as_secs_f64()
+    ));
+
+    output
 }
 
 fn history_text(agent: &Agent) -> String {

@@ -49,6 +49,22 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
     let mut last_message_time: Option<std::time::Instant> = None;
     let mut agent_slot: Option<Agent> = Some(agent);
     let mut managed_backend: Option<crate::backend::BackendProcess> = None;
+    // Session stats for exit summary
+    let session_start = std::time::Instant::now();
+    let mut files_created: Vec<String> = Vec::new();
+    let mut tool_use_counts: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+
+    // Store conversation starters so numeric input (1/2/3) can select them.
+    // Populated from the persona's suggestion pool shown in the banner.
+    let mut active_suggestions: Vec<String> = {
+        let agent_ref = agent_slot.as_ref().expect("agent lost");
+        if let Some(persona) = agent_ref.persona() {
+            anvil_agent::random_suggestions(persona, 3)
+        } else {
+            Vec::new()
+        }
+    };
 
     // Shared state for Ctrl+C handling
     let ctrlc_state = Arc::new(CtrlCState {
@@ -179,6 +195,29 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         if trimmed.is_empty() {
             continue;
         }
+
+        // Handle numeric input as suggestion selection (1/2/3)
+        let trimmed = if !active_suggestions.is_empty() {
+            if let Ok(n) = trimmed.parse::<usize>() {
+                if n >= 1 && n <= active_suggestions.len() {
+                    let suggestion = active_suggestions[n - 1].clone();
+                    println!("  → {suggestion}");
+                    // Clear suggestions after first use
+                    active_suggestions.clear();
+                    // Use a leaked string to get a &str with the right lifetime.
+                    // This is fine — it happens at most once per session.
+                    Box::leak(suggestion.into_boxed_str()) as &str
+                } else {
+                    trimmed
+                }
+            } else {
+                // Any non-numeric input clears suggestions
+                active_suggestions.clear();
+                trimmed
+            }
+        } else {
+            trimmed
+        };
 
         // Rate-limit user messages when a kids persona is active.
         // Slash commands bypass the cooldown so /help always works.
@@ -512,6 +551,15 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         ResetColor,
                     )?;
 
+                    // Track files created for session summary
+                    if name == "file_write" {
+                        if let Ok(args) = serde_json::from_str::<serde_json::Value>(&arguments) {
+                            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                                files_created.push(path.to_string());
+                            }
+                        }
+                    }
+
                     // Track tool usage for achievements
                     pending_triggers.extend(session_tracker.record_tool_call(&name, &arguments));
 
@@ -519,6 +567,9 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                     let _ = perm_tx.send(decision).await;
                 }
                 AgentEvent::ToolResult { name, result } => {
+                    // Track tool usage for session summary
+                    *tool_use_counts.entry(name.clone()).or_insert(0) += 1;
+
                     let icon = tool_icon(&name);
                     let text = result.text();
                     let lines = text.lines().count();
@@ -669,6 +720,20 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         bp.stop();
     }
 
+    // Print session summary
+    let is_kids = agent_slot
+        .as_ref()
+        .and_then(|a| a.persona())
+        .map(|p| anvil_agent::is_kids_persona(&p.key))
+        .unwrap_or(false);
+    print_session_summary(
+        session_start.elapsed(),
+        &cumulative_usage,
+        &tool_use_counts,
+        &files_created,
+        is_kids,
+    );
+
     if let Some(agent) = agent_slot {
         agent.pause_session()?;
     }
@@ -693,6 +758,17 @@ fn print_banner(agent: &Agent) {
         println!();
         println!("  {}", persona.greeting);
         println!();
+
+        // Show conversation starters for kids personas
+        let suggestions = anvil_agent::random_suggestions(persona, 3);
+        if !suggestions.is_empty() {
+            println!("  Try saying:");
+            for (i, s) in suggestions.iter().enumerate() {
+                println!("    {}. \"{}\"", i + 1, s);
+            }
+            println!();
+        }
+
         println!("  model:   {}", agent.model());
         println!("  session: {}", &agent.session_id()[..8]);
         println!("  type /help for commands");
@@ -706,6 +782,12 @@ fn print_banner(agent: &Agent) {
         println!("  mode:    {}", agent.mode());
         println!("  session: {}", &agent.session_id()[..8]);
         println!("  cwd:     {}", agent.workspace().display());
+        // Show last-used profile hint
+        if let Some((name, timestamp)) = anvil_config::load_last_profile() {
+            let ago = format_time_ago(&timestamp);
+            println!("  last profile: {} ({})", name, ago);
+            println!("  tip: anvil -p {} to reuse", name);
+        }
         println!("  type /help for commands");
         println!();
     }
@@ -863,6 +945,103 @@ fn prompt_permission(tool_name: &str, arguments: &str) -> Result<PermissionDecis
     println!("{label}");
 
     Ok(decision)
+}
+
+/// Print a session summary on exit.
+fn print_session_summary(
+    duration: std::time::Duration,
+    usage: &TokenUsage,
+    tool_counts: &std::collections::HashMap<String, u32>,
+    files_created: &[String],
+    is_kids: bool,
+) {
+    let mins = duration.as_secs() / 60;
+    let secs = duration.as_secs() % 60;
+    let duration_str = if mins > 0 {
+        format!("{mins} min {secs}s")
+    } else {
+        format!("{secs}s")
+    };
+
+    // Build tool usage string
+    let tool_str = if tool_counts.is_empty() {
+        "none".to_string()
+    } else {
+        let mut pairs: Vec<_> = tool_counts.iter().collect();
+        pairs.sort_by(|a, b| b.1.cmp(a.1));
+        pairs
+            .iter()
+            .map(|(name, count)| format!("{name} ({count})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    println!();
+    if is_kids {
+        println!("╭─ ✨ What You Made! ✨ ──────────────╮");
+    } else {
+        println!("╭─ Session Summary ─────────────────────╮");
+    }
+    println!("│  Duration: {:<28}│", duration_str);
+    println!(
+        "│  Tokens:   {:<28}│",
+        format_token_count(usage.total_tokens)
+    );
+    println!("│  Tools:    {:<28}│", tool_str);
+
+    if !files_created.is_empty() {
+        let file_list: Vec<&str> = files_created
+            .iter()
+            .map(|f| {
+                // Show just the filename, not the full path
+                f.rsplit('/').next().unwrap_or(f)
+            })
+            .collect();
+        let files_str = if file_list.len() <= 3 {
+            file_list.join(", ")
+        } else {
+            format!(
+                "{}, +{} more",
+                file_list[..3].join(", "),
+                file_list.len() - 3
+            )
+        };
+        println!("│  Files:    {:<28}│", files_str);
+    }
+
+    if is_kids {
+        let thing_count = files_created.len();
+        if thing_count > 0 {
+            println!(
+                "│                                       │"
+            );
+            println!(
+                "│  ✨ You made {} cool thing{}! ✨        │",
+                thing_count,
+                if thing_count == 1 { "" } else { "s" }
+            );
+        }
+    }
+    println!("╰───────────────────────────────────────╯");
+}
+
+/// Format an RFC3339 timestamp as a human-readable "time ago" string.
+fn format_time_ago(timestamp: &str) -> String {
+    let Ok(then) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
+        return "unknown".to_string();
+    };
+    let now = chrono::Utc::now();
+    let duration = now.signed_duration_since(then);
+    let mins = duration.num_minutes();
+    if mins < 1 {
+        "just now".to_string()
+    } else if mins < 60 {
+        format!("{mins} min ago")
+    } else if mins < 1440 {
+        format!("{} hours ago", mins / 60)
+    } else {
+        format!("{} days ago", mins / 1440)
+    }
 }
 
 /// Format token count for compact display (e.g., 1234 → "1.2k", 500 → "500").

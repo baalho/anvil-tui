@@ -16,7 +16,7 @@ pub use agent::{Agent, AgentEvent, CompactionResult};
 pub use autonomous::{AutonomousConfig, AutonomousRunner, IterationResult};
 pub use memory::MemoryStore;
 pub use mode::Mode;
-pub use persona::{builtin_personas, find_persona, is_kids_persona, Persona};
+pub use persona::{builtin_personas, find_persona, is_kids_persona, random_suggestions, Persona};
 pub use routing::ModelRouter;
 pub use session::{
     SearchResult, Session, SessionStatus, SessionStore, StoredMessage, ToolCallEntry,

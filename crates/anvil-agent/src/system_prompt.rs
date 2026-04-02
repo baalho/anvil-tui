@@ -121,6 +121,17 @@ pub fn build_system_prompt(
         prompt.push_str(&inv_section);
     }
 
+    // --- Layer 4c: Project detection (semi-static) ---
+    // Detected from workspace files. Gives the model context about the project
+    // type, build system, and test commands without the user having to explain.
+    let project_info = detect_project(workspace);
+    if !project_info.is_empty() {
+        prompt.push_str("\n## Project\n");
+        for info in &project_info {
+            prompt.push_str(&format!("- {info}\n"));
+        }
+    }
+
     // --- Layer 5: Dynamic content (changes every turn) ---
     // Environment info and memory go last so the prefix above stays stable.
     prompt.push_str("\n## Environment\n");
@@ -145,6 +156,60 @@ pub fn build_system_prompt(
     }
 
     prompt
+}
+
+/// Detect project type from workspace files.
+///
+/// Scans for common project markers and returns a list of short descriptions.
+/// Lightweight — only checks file existence, doesn't parse contents.
+fn detect_project(workspace: &Path) -> Vec<String> {
+    let mut info = Vec::new();
+
+    // Language / framework detection
+    if workspace.join("Cargo.toml").exists() {
+        info.push("Rust project. Build: cargo build. Test: cargo test. Lint: cargo clippy.".to_string());
+    }
+    if workspace.join("package.json").exists() {
+        // Detect package manager
+        let pm = if workspace.join("pnpm-lock.yaml").exists() {
+            "pnpm"
+        } else if workspace.join("yarn.lock").exists() {
+            "yarn"
+        } else {
+            "npm"
+        };
+        info.push(format!("Node.js project. Package manager: {pm}."));
+    }
+    if workspace.join("pyproject.toml").exists() {
+        info.push("Python project (pyproject.toml).".to_string());
+    } else if workspace.join("requirements.txt").exists() {
+        info.push("Python project (requirements.txt).".to_string());
+    }
+    if workspace.join("go.mod").exists() {
+        info.push("Go project. Build: go build. Test: go test ./...".to_string());
+    }
+
+    // Build / infrastructure markers
+    if workspace.join("Makefile").exists() {
+        info.push("Has Makefile.".to_string());
+    }
+    if workspace.join("docker-compose.yml").exists()
+        || workspace.join("docker-compose.yaml").exists()
+        || workspace.join("compose.yml").exists()
+        || workspace.join("compose.yaml").exists()
+    {
+        info.push("Has Docker Compose.".to_string());
+    }
+    if workspace.join("Dockerfile").exists() {
+        info.push("Has Dockerfile.".to_string());
+    }
+
+    // VCS
+    if workspace.join(".git").exists() {
+        info.push("Git repository.".to_string());
+    }
+
+    info
 }
 
 #[cfg(test)]
@@ -293,6 +358,57 @@ mod tests {
         }
     }
 
+    #[test]
+    fn detects_rust_project() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
+        let info = detect_project(dir.path());
+        assert!(info.iter().any(|s| s.contains("Rust")));
+    }
+
+    #[test]
+    fn detects_node_project_with_pnpm() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("pnpm-lock.yaml"), "").unwrap();
+        let info = detect_project(dir.path());
+        assert!(info.iter().any(|s| s.contains("pnpm")));
+    }
+
+    #[test]
+    fn detects_python_project() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("pyproject.toml"), "").unwrap();
+        let info = detect_project(dir.path());
+        assert!(info.iter().any(|s| s.contains("Python")));
+    }
+
+    #[test]
+    fn detects_go_project() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module test").unwrap();
+        let info = detect_project(dir.path());
+        assert!(info.iter().any(|s| s.contains("Go")));
+    }
+
+    #[test]
+    fn empty_dir_detects_nothing() {
+        let dir = TempDir::new().unwrap();
+        let info = detect_project(dir.path());
+        assert!(info.is_empty());
+    }
+
+    #[test]
+    fn project_info_in_system_prompt() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let prompt = build_system_prompt(dir.path(), None, "m", &[]);
+        assert!(prompt.contains("## Project"));
+        assert!(prompt.contains("Rust"));
+        assert!(prompt.contains("Git repository"));
+    }
+
     /// Enforces the full layer contract: every layer marker must appear
     /// in strict ascending order. If a future change inserts dynamic
     /// content above static content, this test fails — protecting KV
@@ -303,6 +419,9 @@ mod tests {
         let anvil_dir = dir.path().join(".anvil");
         std::fs::create_dir_all(&anvil_dir).unwrap();
         std::fs::write(anvil_dir.join("context.md"), "LAYER4_CONTEXT_MARKER").unwrap();
+
+        // Create a project marker so Layer 4c appears
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
 
         let memory_dir = anvil_dir.join("memory");
         std::fs::create_dir_all(&memory_dir).unwrap();
@@ -336,6 +455,10 @@ mod tests {
         let layer4 = prompt
             .find("LAYER4_CONTEXT_MARKER")
             .expect("context marker missing");
+        // Layer 4c: project detection (semi-static)
+        let layer4c = prompt
+            .find("## Project")
+            .expect("project section missing");
         // Layer 5a: environment (dynamic)
         let layer5a = prompt
             .find("## Environment")
@@ -354,8 +477,12 @@ mod tests {
             "Layer 3 (skills) must precede Layer 4 (context)"
         );
         assert!(
-            layer4 < layer5a,
-            "Layer 4 (context) must precede Layer 5 (environment)"
+            layer4 < layer4c,
+            "Layer 4 (context) must precede Layer 4c (project)"
+        );
+        assert!(
+            layer4c < layer5a,
+            "Layer 4c (project) must precede Layer 5 (environment)"
         );
         assert!(
             layer5a < layer5b,

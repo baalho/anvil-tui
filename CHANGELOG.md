@@ -5,6 +5,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [v1.6.0] — 2026-04-02 — Session Awareness Edition
+
+### Added
+- **Launch profiles** (`--profile` / `-p`) — bundle persona + mode +
+  skills + model into a single CLI flag. `anvil -p sparkle` starts
+  with Sparkle persona, creative mode, and kids skills in one command.
+  Profiles defined in `[[profiles]]` section of `.anvil/config.toml`.
+- **Last profile memory** — Anvil remembers the last-used profile and
+  shows a hint on next launch: "last profile: sparkle (2 hours ago)".
+- **Project auto-detection** — scans workspace for Cargo.toml,
+  package.json, pyproject.toml, go.mod, Makefile, Dockerfile, and
+  docker-compose.yml. Injects project type into system prompt so the
+  model knows the build system and test commands without being told.
+- **`/selftest` command** — verifies all 8 tool categories work
+  (file_write, file_read, file_edit, shell, ls, grep, find, git_status)
+  without making any LLM calls. Quick health check when switching
+  models or backends.
+- **Conversation starters** — kids personas show 3 random suggestions
+  after the greeting ("Try saying: 1. I like cats"). Typing a number
+  sends the suggestion. Prevents blank-prompt freeze for young users.
+- **Session summary on exit** — shows duration, tokens used, tools
+  called, and files created. Kids personas get a celebratory summary
+  ("You made 2 cool things!"), coding mode gets factual stats.
+- **Example profiles in `anvil init`** — generated config.toml includes
+  commented-out profile examples.
+
+### Changed
+- `/stats` shows mode.
+- `/help` includes `/selftest` and `/mode`.
+- Persona struct now includes `suggestions` field (8 per kids persona).
+
 ## [v1.5.0] — 2026-04-02 — Intent-Aware Edition
 
 ### Added

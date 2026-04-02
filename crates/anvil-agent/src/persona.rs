@@ -23,6 +23,39 @@ pub struct Persona {
     pub prompt: String,
     /// Greeting message shown when the persona is activated.
     pub greeting: String,
+    /// Conversation starters shown after the greeting. Kids personas
+    /// show 3 random suggestions so the child doesn't face a blank prompt.
+    pub suggestions: Vec<String>,
+}
+
+/// Pick `n` random suggestions from a persona's pool.
+pub fn random_suggestions(persona: &Persona, n: usize) -> Vec<String> {
+    use std::collections::HashSet;
+
+    if persona.suggestions.is_empty() || n == 0 {
+        return Vec::new();
+    }
+
+    let mut rng_seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+
+    let mut picked = HashSet::new();
+    let mut result = Vec::new();
+    let max = persona.suggestions.len();
+    let count = n.min(max);
+
+    while result.len() < count {
+        // Simple LCG for randomness without pulling in rand crate
+        rng_seed = rng_seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        let idx = (rng_seed as usize) % max;
+        if picked.insert(idx) {
+            result.push(persona.suggestions[idx].clone());
+        }
+    }
+
+    result
 }
 
 /// Load all built-in personas.
@@ -54,6 +87,16 @@ pub fn builtin_personas() -> Vec<Persona> {
             greeting:
                 "✨ Hi! I'm Sparkle! Tell me something you like and I'll make something magical! ✨"
                     .to_string(),
+            suggestions: vec![
+                "I like cats".to_string(),
+                "Make something with rainbows".to_string(),
+                "Tell me a joke".to_string(),
+                "I like dinosaurs".to_string(),
+                "Make a magic spell".to_string(),
+                "Draw me a star".to_string(),
+                "I like space".to_string(),
+                "Make something sparkly".to_string(),
+            ],
         },
         Persona {
             key: "bolt".to_string(),
@@ -79,6 +122,16 @@ pub fn builtin_personas() -> Vec<Persona> {
             ]
             .join("\n"),
             greeting: "BEEP BOOP! I'm Bolt! [whirr] Tell me what to build! [click]".to_string(),
+            suggestions: vec![
+                "Build me a rocket".to_string(),
+                "Make a calculator".to_string(),
+                "I want a robot friend".to_string(),
+                "Build a game".to_string(),
+                "Make something that counts".to_string(),
+                "Build a clock".to_string(),
+                "Make a secret code machine".to_string(),
+                "Build something that beeps".to_string(),
+            ],
         },
         Persona {
             key: "codebeard".to_string(),
@@ -106,6 +159,16 @@ pub fn builtin_personas() -> Vec<Persona> {
             greeting:
                 "Ahoy, matey! I'm Captain Codebeard! What adventure shall we go on? 🏴‍☠️"
                     .to_string(),
+            suggestions: vec![
+                "Find the treasure".to_string(),
+                "I want a treasure map".to_string(),
+                "Make a pirate flag".to_string(),
+                "Tell me a pirate story".to_string(),
+                "Sail to a new island".to_string(),
+                "I want a parrot".to_string(),
+                "Build a pirate ship".to_string(),
+                "Find a secret message".to_string(),
+            ],
         },
         Persona {
             key: "homelab".to_string(),
@@ -126,6 +189,7 @@ pub fn builtin_personas() -> Vec<Persona> {
             ]
             .join("\n"),
             greeting: "⚙ Homelab mode active. What do you need to deploy or manage?".to_string(),
+            suggestions: Vec::new(), // No suggestions for non-kids personas
         },
     ]
 }
@@ -210,5 +274,42 @@ mod tests {
         // homelab is NOT a kids persona
         assert!(!is_kids_persona("homelab"));
         assert!(!is_kids_persona("nonexistent"));
+    }
+
+    #[test]
+    fn kids_personas_have_suggestions() {
+        for p in builtin_personas() {
+            if is_kids_persona(&p.key) {
+                assert!(
+                    p.suggestions.len() >= 6,
+                    "{} should have at least 6 suggestions, has {}",
+                    p.key,
+                    p.suggestions.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn homelab_has_no_suggestions() {
+        let homelab = find_persona("homelab").unwrap();
+        assert!(homelab.suggestions.is_empty());
+    }
+
+    #[test]
+    fn random_suggestions_returns_requested_count() {
+        let sparkle = find_persona("sparkle").unwrap();
+        let picks = random_suggestions(&sparkle, 3);
+        assert_eq!(picks.len(), 3);
+        // All picks should be unique
+        let unique: std::collections::HashSet<_> = picks.iter().collect();
+        assert_eq!(unique.len(), 3);
+    }
+
+    #[test]
+    fn random_suggestions_empty_for_no_suggestions() {
+        let homelab = find_persona("homelab").unwrap();
+        let picks = random_suggestions(&homelab, 3);
+        assert!(picks.is_empty());
     }
 }
