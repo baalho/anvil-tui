@@ -107,6 +107,61 @@ pub struct ToolCallFunction {
     pub arguments: String,
 }
 
+/// Controls whether the model should use tools, and how.
+///
+/// Maps to the OpenAI `tool_choice` parameter. Without this, models may
+/// ignore available tools and respond with text even when a tool call is
+/// the correct action (e.g., printing code instead of using `file_write`).
+///
+/// # Variants
+/// - `Mode("auto")` — model decides whether to use tools (default for coding)
+/// - `Mode("none")` — model must not use tools (creative/chat mode)
+/// - `Mode("required")` — model must call at least one tool
+/// - `Function { .. }` — model must call a specific function
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ToolChoice {
+    /// String mode: "auto", "none", or "required".
+    Mode(String),
+    /// Force a specific function call.
+    Function {
+        #[serde(rename = "type")]
+        choice_type: String,
+        function: ToolChoiceFunction,
+    },
+}
+
+/// Identifies a specific function for `ToolChoice::Function`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolChoiceFunction {
+    pub name: String,
+}
+
+impl ToolChoice {
+    /// Model decides whether to use tools. Default for coding mode.
+    pub fn auto() -> Self {
+        Self::Mode("auto".to_string())
+    }
+
+    /// Model must not use tools. Used in creative mode.
+    pub fn none() -> Self {
+        Self::Mode("none".to_string())
+    }
+
+    /// Model must call at least one tool.
+    pub fn required() -> Self {
+        Self::Mode("required".to_string())
+    }
+
+    /// Model must call a specific function by name.
+    pub fn function(name: impl Into<String>) -> Self {
+        Self::Function {
+            choice_type: "function".to_string(),
+            function: ToolChoiceFunction { name: name.into() },
+        }
+    }
+}
+
 /// The request body for `/v1/chat/completions`.
 ///
 /// # Sampling parameters
@@ -125,6 +180,10 @@ pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
+    /// Controls whether the model should use tools. When `None`, the backend
+    /// uses its default behavior (typically equivalent to "auto").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]

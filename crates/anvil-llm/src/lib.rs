@@ -18,8 +18,8 @@ mod usage;
 
 pub use client::LlmClient;
 pub use message::{
-    ChatMessage, ChatRequest, ChatResponse, Role, ToolCall, ToolCallFunction, ToolDefinition,
-    ToolParameterProperty, ToolParameters,
+    ChatMessage, ChatRequest, ChatResponse, Role, ToolCall, ToolCallFunction, ToolChoice,
+    ToolChoiceFunction, ToolDefinition, ToolParameterProperty, ToolParameters,
 };
 pub use retry::RetryConfig;
 pub use stream::{StreamEvent, ToolCallAccumulator};
