@@ -1,4 +1,3 @@
-pub mod app;
 mod backend;
 mod commands;
 mod interactive;
@@ -30,10 +29,6 @@ struct Cli {
     /// Resume the most recent session, or a specific session by ID prefix
     #[arg(short = 'c', long = "continue")]
     continue_session: Option<Option<String>>,
-
-    /// Use the decoupled async TUI (60fps, non-blocking)
-    #[arg(long = "tui")]
-    decoupled_tui: bool,
 }
 
 #[derive(Subcommand)]
@@ -47,11 +42,6 @@ enum Commands {
         /// Search session content
         #[arg(short, long)]
         search: Option<String>,
-    },
-    /// Show detailed documentation on a topic (tools, skills, config, commands)
-    Docs {
-        /// Topic to show docs for
-        topic: String,
     },
     /// Run a single prompt non-interactively
     Run {
@@ -95,7 +85,6 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Init) => cmd_init(&workspace),
-        Some(Commands::Docs { topic }) => cmd_help(&topic),
         Some(Commands::History { limit, search }) => cmd_history(limit, search),
         Some(Commands::Run {
             prompt,
@@ -151,29 +140,16 @@ async fn main() -> Result<()> {
                 agent.apply_model_profile(profile);
             }
 
-            if cli.decoupled_tui {
-                app::run_decoupled(agent, summary).await
-            } else {
-                interactive::run_interactive(agent, summary).await
+            // Warn if Ollama backend without OLLAMA_NUM_CTX set
+            if matches!(agent.backend(), anvil_config::BackendKind::Ollama)
+                && std::env::var("OLLAMA_NUM_CTX").is_err()
+            {
+                eprintln!("  ⚠ Ollama defaults to 2048 context. Set OLLAMA_NUM_CTX=8192 or use a model profile.");
             }
+
+            interactive::run_interactive(agent, summary).await
         }
     }
-}
-
-fn cmd_help(topic: &str) -> Result<()> {
-    let text = match topic {
-        "tools" => include_str!("help/tools.md"),
-        "skills" => include_str!("help/skills.md"),
-        "config" => include_str!("help/config.md"),
-        "commands" => include_str!("help/commands.md"),
-        _ => {
-            println!("Available topics: tools, skills, config, commands");
-            println!("\nUsage: anvil help <topic>");
-            return Ok(());
-        }
-    };
-    println!("{text}");
-    Ok(())
 }
 
 fn cmd_init(workspace: &Path) -> Result<()> {
@@ -363,7 +339,7 @@ async fn cmd_run(
             }
             AgentEvent::ToolResult { name, result } => {
                 if !json_output {
-                    eprintln!("[{name} result: {} chars]", result.len());
+                    eprintln!("[{name} result: {} chars]", result.text().len());
                 }
             }
             AgentEvent::Usage(u) => {
@@ -551,7 +527,7 @@ async fn cmd_run_autonomous(
                     eprintln!("\n[tool: {name}({arguments})]");
                 }
                 AgentEvent::ToolResult { name, result } => {
-                    eprintln!("[{name} result: {} chars]", result.len());
+                    eprintln!("[{name} result: {} chars]", result.text().len());
                 }
                 AgentEvent::Error(e) => {
                     eprintln!("\nerror: {e}");

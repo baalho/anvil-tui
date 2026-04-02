@@ -12,7 +12,7 @@ Single source of truth for AI agents working in this codebase.
 - **Repo**: https://github.com/baalho/anvil-tui
 - **License**: Apache-2.0
 - **Rust**: edition 2021, MSRV 1.75
-- **Version**: 1.2.0
+- **Version**: 1.4.0
 - **Platforms**: macOS, Linux, Windows/WSL
 - **Default model**: `qwen3-coder:30b` (Ollama)
 
@@ -43,7 +43,7 @@ anvil-config ──┬──► anvil-llm ──┐
 | `anvil-tools` | 11 tools, executor, permissions, plugins, hooks, truncation |
 | `anvil-mcp` | MCP client — JSON-RPC over stdio |
 | `anvil-agent` | Agent loop, skills, personas, achievements, sessions, autonomous mode |
-| `anvil` | CLI binary, interactive mode, 14 slash commands |
+| `anvil` | CLI binary, interactive mode, 15 slash commands |
 
 ### Key abstractions
 
@@ -119,6 +119,7 @@ These prevent real bugs. Don't violate them.
 - **Ollama 2048 default**: Set `OLLAMA_NUM_CTX` or use model profile `context.default_window`.
 - **GLM-4.7-Flash**: Use llama-server with `--jinja`. Set `repeat_penalty = 1.0`.
 - **Don't assume model capabilities**: Test with smallest model you support.
+- **No DynTool trait**: A trait-based tool system was built and deleted. Simple match dispatch is enough.
 
 ---
 
@@ -144,11 +145,12 @@ Before any change:
 | File | Purpose |
 |------|---------|
 | `crates/anvil/src/main.rs` | CLI entry, clap args, MCP init, Ralph Loop |
-| `crates/anvil/src/commands.rs` | 14 slash commands |
+| `crates/anvil/src/commands.rs` | 15 slash commands |
 | `crates/anvil/src/interactive.rs` | Readline loop, streaming display |
 | `crates/anvil-agent/src/agent.rs` | Agent::turn() core loop |
 | `crates/anvil-agent/src/skills.rs` | Skill parsing, YAML frontmatter |
 | `crates/anvil-agent/src/autonomous.rs` | Ralph Loop runner |
+| `crates/anvil-agent/src/achievements.rs` | Badge system, session tracker |
 | `crates/anvil-agent/src/persona.rs` | 4 personas (sparkle, bolt, codebeard, homelab) |
 | `crates/anvil-agent/src/system_prompt.rs` | Layered prompt builder |
 | `crates/anvil-config/src/profiles.rs` | 9 model profiles |
@@ -158,6 +160,7 @@ Before any change:
 | `crates/anvil-llm/src/client.rs` | LlmClient, streaming, retry |
 | `crates/anvil-tools/src/tools.rs` | 11 tool implementations |
 | `crates/anvil-tools/src/executor.rs` | Tool dispatch, validation |
+| `crates/anvil-tools/src/hooks.rs` | Pre/post hooks, platform-agnostic script discovery |
 | `crates/anvil-mcp/src/manager.rs` | MCP server lifecycle |
 
 ## Known Issues

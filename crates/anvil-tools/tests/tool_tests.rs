@@ -1,8 +1,18 @@
-use anvil_tools::ToolExecutor;
+use anvil_tools::{ToolExecutor, ToolOutput};
 use serde_json::json;
 use std::fs;
 use std::process::Command;
 use tempfile::TempDir;
+
+/// Helper to unwrap ToolOutput to String for test assertions.
+trait IntoTestString {
+    fn text_string(self) -> String;
+}
+impl IntoTestString for anyhow::Result<ToolOutput> {
+    fn text_string(self) -> String {
+        self.unwrap().into_text()
+    }
+}
 
 fn setup() -> (TempDir, ToolExecutor) {
     let dir = TempDir::new().unwrap();
@@ -57,13 +67,13 @@ async fn file_write_and_read() {
             &json!({"path": "test.txt", "content": "hello world"}),
         )
         .await
-        .unwrap();
+        .text_string();
     assert!(write_result.contains("wrote"));
 
     let read_result = executor
         .execute("file_read", &json!({"path": "test.txt"}))
         .await
-        .unwrap();
+        .text_string();
     assert!(read_result.contains("hello world"));
 }
 
@@ -82,7 +92,7 @@ async fn file_read_with_line_range() {
             &json!({"path": "lines.txt", "start_line": 2, "end_line": 4}),
         )
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("line2"));
     assert!(result.contains("line4"));
     assert!(!result.contains("line1"));
@@ -100,7 +110,7 @@ async fn file_edit_replaces_unique_match() {
             &json!({"path": "edit.txt", "old_str": "bar", "new_str": "qux"}),
         )
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("edited"));
 
     let content = fs::read_to_string(dir.path().join("edit.txt")).unwrap();
@@ -146,7 +156,7 @@ async fn file_edit_delete_when_new_str_omitted() {
             &json!({"path": "edit.txt", "old_str": " remove"}),
         )
         .await
-        .unwrap();
+        .text_string();
 
     let content = fs::read_to_string(dir.path().join("edit.txt")).unwrap();
     assert_eq!(content, "keep keep");
@@ -159,7 +169,7 @@ async fn shell_executes_string_command() {
     let result = executor
         .execute("shell", &json!({"command": "echo hello"}))
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("hello"));
     assert!(result.contains("exit code: 0"));
 }
@@ -172,12 +182,12 @@ async fn shell_with_pipes_and_chains() {
     let result = executor
         .execute("shell", &json!({"command": "echo hello && echo world"}))
         .await
-        .unwrap();
+        .text_string();
     #[cfg(windows)]
     let result = executor
         .execute("shell", &json!({"command": "echo hello & echo world"}))
         .await
-        .unwrap();
+        .text_string();
 
     assert!(result.contains("hello"));
     assert!(result.contains("world"));
@@ -191,12 +201,12 @@ async fn shell_reports_nonzero_exit() {
     let result = executor
         .execute("shell", &json!({"command": "false"}))
         .await
-        .unwrap();
+        .text_string();
     #[cfg(windows)]
     let result = executor
         .execute("shell", &json!({"command": "exit /b 1"}))
         .await
-        .unwrap();
+        .text_string();
 
     assert!(result.contains("exit code: 1"));
 }
@@ -236,7 +246,7 @@ async fn grep_finds_matches() {
     let result = executor
         .execute("grep", &json!({"pattern": "^ap", "path": "search.txt"}))
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("apple"));
     assert!(result.contains("apricot"));
     assert!(!result.contains("banana"));
@@ -250,7 +260,7 @@ async fn grep_no_matches() {
     let result = executor
         .execute("grep", &json!({"pattern": "cherry", "path": "search.txt"}))
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("no matches"));
 }
 
@@ -268,7 +278,7 @@ async fn grep_directory_with_include() {
             &json!({"pattern": "fn", "path": "src", "include": "*.rs"}),
         )
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("main.rs"));
     assert!(!result.contains("notes.txt"));
 }
@@ -297,7 +307,7 @@ async fn output_truncation_with_temp_file() {
     let result = executor
         .execute("file_read", &json!({"path": "long.txt"}))
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("[Showing lines"));
     assert!(result.contains("Full output:"));
 }
@@ -335,7 +345,7 @@ async fn ls_shows_hidden_with_all_flag() {
     let result = executor
         .execute("ls", &json!({"path": ".", "all": true}))
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("visible.txt"));
     assert!(result.contains(".hidden"));
 }
@@ -359,7 +369,7 @@ async fn find_matches_glob() {
     let result = executor
         .execute("find", &json!({"pattern": "*.rs", "path": "."}))
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("main.rs"));
     assert!(result.contains("lib.rs"));
     assert!(!result.contains("notes.txt"));
@@ -373,7 +383,7 @@ async fn find_no_matches() {
     let result = executor
         .execute("find", &json!({"pattern": "*.xyz"}))
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("no files found"));
 }
 
@@ -450,7 +460,7 @@ async fn file_cache_invalidated_on_write() {
     let r1 = executor
         .execute("file_read", &json!({"path": "cached.txt"}))
         .await
-        .unwrap();
+        .text_string();
     assert!(r1.contains("original"));
 
     executor
@@ -459,12 +469,12 @@ async fn file_cache_invalidated_on_write() {
             &json!({"path": "cached.txt", "content": "updated"}),
         )
         .await
-        .unwrap();
+        .text_string();
 
     let r2 = executor
         .execute("file_read", &json!({"path": "cached.txt"}))
         .await
-        .unwrap();
+        .text_string();
     assert!(r2.contains("updated"), "got: {r2}");
 }
 
@@ -476,7 +486,7 @@ async fn file_cache_invalidated_on_edit() {
     let _ = executor
         .execute("file_read", &json!({"path": "edit_me.txt"}))
         .await
-        .unwrap();
+        .text_string();
 
     executor
         .execute(
@@ -484,12 +494,12 @@ async fn file_cache_invalidated_on_edit() {
             &json!({"path": "edit_me.txt", "old_str": "hello", "new_str": "goodbye"}),
         )
         .await
-        .unwrap();
+        .text_string();
 
     let result = executor
         .execute("file_read", &json!({"path": "edit_me.txt"}))
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("goodbye"), "got: {result}");
 }
 
@@ -589,7 +599,7 @@ async fn validate_numeric_args_accepted() {
             &json!({"path": "data.txt", "start_line": 2, "end_line": 3}),
         )
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("line2"), "got: {result}");
 }
 
@@ -602,7 +612,7 @@ async fn validate_boolean_args_accepted() {
     let result = executor
         .execute("ls", &json!({"path": ".", "all": true}))
         .await
-        .unwrap();
+        .text_string();
     assert!(!result.is_empty());
 }
 
@@ -631,7 +641,7 @@ async fn git_status_verbose() {
     let result = executor
         .execute("git_status", &json!({"verbose": true}))
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("nothing to commit"));
 }
 
@@ -665,7 +675,7 @@ async fn git_diff_staged() {
     let result = executor
         .execute("git_diff", &json!({"staged": true}))
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("Staged"));
 }
 
@@ -682,7 +692,7 @@ async fn git_log_with_count() {
     let result = executor
         .execute("git_log", &json!({"count": 1}))
         .await
-        .unwrap();
+        .text_string();
     let lines: Vec<&str> = result.trim().lines().collect();
     assert_eq!(lines.len(), 1);
 }
@@ -693,7 +703,7 @@ async fn git_log_detailed_format() {
     let result = executor
         .execute("git_log", &json!({"oneline": false}))
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("test@test.com"));
 }
 
@@ -708,7 +718,7 @@ async fn git_commit_with_files() {
             &json!({"message": "add new file", "files": ["new.txt"]}),
         )
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("add new file"));
 
     // Verify commit is in log
@@ -727,7 +737,7 @@ async fn git_commit_all_flag() {
             &json!({"message": "update readme", "all": true}),
         )
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("update readme"));
 }
 
@@ -737,7 +747,7 @@ async fn git_commit_nothing_to_commit() {
     let result = executor
         .execute("git_commit", &json!({"message": "empty"}))
         .await
-        .unwrap();
+        .text_string();
     assert!(result.contains("nothing to commit"));
 }
 
@@ -754,4 +764,78 @@ async fn git_tools_read_only_classification() {
     assert!(anvil_tools::PermissionHandler::is_read_only("git_diff"));
     assert!(anvil_tools::PermissionHandler::is_read_only("git_log"));
     assert!(!anvil_tools::PermissionHandler::is_read_only("git_commit"));
+}
+
+#[tokio::test]
+async fn kids_sandbox_blocks_disallowed_commands() {
+    let (_dir, executor) = setup();
+    executor.set_kids_sandbox(anvil_tools::KidsSandbox {
+        workspace: _dir.path().to_path_buf(),
+        allowed_commands: vec!["echo".to_string(), "ls".to_string()],
+    });
+
+    // Allowed command works
+    let result = executor
+        .execute("shell", &json!({"command": "echo hello"}))
+        .await;
+    assert!(result.is_ok());
+
+    // Disallowed command is blocked
+    let result = executor
+        .execute("shell", &json!({"command": "rm -rf /"}))
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("isn't available in kids mode"), "got: {err}");
+}
+
+#[tokio::test]
+async fn kids_sandbox_uses_restricted_workspace() {
+    let dir = TempDir::new().unwrap();
+    let kids_dir = dir.path().join("kids-projects");
+    fs::create_dir_all(&kids_dir).unwrap();
+    fs::write(kids_dir.join("hello.txt"), "sparkle content").unwrap();
+
+    let executor = ToolExecutor::new(dir.path().to_path_buf(), 10, 10_000);
+    executor.set_kids_sandbox(anvil_tools::KidsSandbox {
+        workspace: kids_dir,
+        allowed_commands: vec!["echo".to_string()],
+    });
+
+    // Can read files in kids workspace
+    let result = executor
+        .execute("file_read", &json!({"path": "hello.txt"}))
+        .await
+        .text_string();
+    assert!(result.contains("sparkle content"));
+
+    // Cannot traverse out of kids workspace
+    let result = executor
+        .execute("file_read", &json!({"path": "../secret.txt"}))
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn kids_sandbox_cleared_allows_all() {
+    let (_dir, executor) = setup();
+    executor.set_kids_sandbox(anvil_tools::KidsSandbox {
+        workspace: _dir.path().to_path_buf(),
+        allowed_commands: vec!["echo".to_string()],
+    });
+
+    // rm is blocked
+    let result = executor
+        .execute("shell", &json!({"command": "rm --help"}))
+        .await;
+    assert!(result.is_err());
+
+    // Clear sandbox
+    executor.clear_kids_sandbox();
+
+    // Now unrestricted
+    let result = executor
+        .execute("shell", &json!({"command": "echo unblocked"}))
+        .await;
+    assert!(result.is_ok());
 }

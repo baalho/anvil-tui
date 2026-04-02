@@ -28,7 +28,10 @@ pub enum AgentEvent {
         arguments: String,
     },
     /// Tool execution completed.
-    ToolResult { name: String, result: String },
+    ToolResult {
+        name: String,
+        result: anvil_tools::ToolOutput,
+    },
     /// Updated token usage.
     Usage(TokenUsage),
     /// Agent turn completed (assistant finished responding).
@@ -75,7 +78,7 @@ pub struct Agent {
     client: LlmClient,
     executor: ToolExecutor,
     store: SessionStore,
-    _settings: Settings,
+    settings: Settings,
     _workspace: PathBuf,
     session_id: String,
     messages: Vec<ChatMessage>,
@@ -124,7 +127,7 @@ impl Agent {
             client,
             executor,
             store,
-            _settings: settings,
+            settings,
             _workspace: workspace,
             session_id: session.id,
             messages,
@@ -204,7 +207,7 @@ impl Agent {
             client,
             executor,
             store,
-            _settings: settings,
+            settings,
             _workspace: workspace,
             session_id: session_id.to_string(),
             messages,
@@ -489,7 +492,7 @@ impl Agent {
     fn rebuild_system_prompt(&mut self) {
         let mut prompt = build_system_prompt(
             &self._workspace,
-            self._settings.agent.system_prompt_override.as_deref(),
+            self.settings.agent.system_prompt_override.as_deref(),
             self.client.model(),
             &self.active_skills,
         );
@@ -514,7 +517,49 @@ impl Agent {
     }
 
     /// Activate a character persona. Rebuilds the system prompt with persona instructions.
+    /// When a kids persona is activated and `kids_workspace` is configured,
+    /// the executor's sandbox is engaged — restricting file paths and shell commands.
     pub fn set_persona(&mut self, persona: Option<crate::persona::Persona>) {
+        // Update sandbox based on persona
+        if let Some(ref p) = persona {
+            if crate::persona::is_kids_persona(&p.key) {
+                if let Some(ref kids_ws) = self.settings.agent.kids_workspace {
+                    // Manual tilde expansion (no shellexpand dependency)
+                    let expanded = if let Some(rest) = kids_ws.strip_prefix("~/") {
+                        if let Some(home) = std::env::var_os("HOME") {
+                            std::path::PathBuf::from(home).join(rest)
+                        } else {
+                            std::path::PathBuf::from(kids_ws)
+                        }
+                    } else {
+                        std::path::PathBuf::from(kids_ws)
+                    };
+                    let ws_path = expanded;
+                    // Create the directory if it doesn't exist
+                    let _ = std::fs::create_dir_all(&ws_path);
+                    let allowed = self
+                        .settings
+                        .agent
+                        .kids_allowed_commands
+                        .clone()
+                        .unwrap_or_else(|| {
+                            anvil_tools::DEFAULT_KIDS_COMMANDS
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect()
+                        });
+                    self.executor.set_kids_sandbox(anvil_tools::KidsSandbox {
+                        workspace: ws_path,
+                        allowed_commands: allowed,
+                    });
+                }
+            } else {
+                self.executor.clear_kids_sandbox();
+            }
+        } else {
+            self.executor.clear_kids_sandbox();
+        }
+
         self.active_persona = persona;
         self.rebuild_system_prompt();
     }
@@ -795,7 +840,7 @@ impl Agent {
                 for tc in &read_only {
                     self.record_tool_call_hash(&tc.function.name, &tc.function.arguments);
                     let args: serde_json::Value =
-                        serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                        crate::json_filter::extract_json(&tc.function.arguments);
                     let name = tc.function.name.clone();
                     let executor = self.executor.clone();
                     handles.push(tokio::spawn(async move {
@@ -803,7 +848,7 @@ impl Agent {
                         let result = executor
                             .execute(&name, &args)
                             .await
-                            .unwrap_or_else(|e| format!("error: {e}"));
+                            .unwrap_or_else(|e| format!("error: {e}").into());
                         let duration = start.elapsed();
                         (result, duration)
                     }));
@@ -813,17 +858,18 @@ impl Agent {
                 for (tc, handle) in read_only.iter().zip(handles) {
                     let (result, duration) = handle.await.unwrap_or_else(|e| {
                         (
-                            format!("error: task panicked: {e}"),
+                            format!("error: task panicked: {e}").into(),
                             std::time::Duration::ZERO,
                         )
                     });
 
+                    let result_text = result.text().to_string();
                     self.store.save_tool_call(&ToolCallEntry {
                         session_id: &self.session_id,
                         message_id: &msg_id,
                         tool_name: &tc.function.name,
                         arguments: &tc.function.arguments,
-                        result: Some(&result),
+                        result: Some(&result_text),
                         duration_ms: Some(duration.as_millis() as i64),
                         permission: "allowed",
                     })?;
@@ -831,16 +877,16 @@ impl Agent {
                     let _ = event_tx
                         .send(AgentEvent::ToolResult {
                             name: tc.function.name.clone(),
-                            result: result.clone(),
+                            result,
                         })
                         .await;
 
-                    let tool_result_msg = ChatMessage::tool_result(&tc.id, &result);
+                    let tool_result_msg = ChatMessage::tool_result(&tc.id, &result_text);
                     self.messages.push(tool_result_msg);
                     self.store.save_message(
                         &self.session_id,
                         "tool",
-                        Some(&result),
+                        Some(&result_text),
                         None,
                         Some(&tc.id),
                     )?;
@@ -855,7 +901,7 @@ impl Agent {
                 }
 
                 let args: serde_json::Value =
-                    serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                    crate::json_filter::extract_json(&tc.function.arguments);
 
                 // Loop detection
                 if let Some(count) =
@@ -894,7 +940,7 @@ impl Agent {
                     PermissionDecision::Allow
                 };
 
-                let result = match decision {
+                let result: anvil_tools::ToolOutput = match decision {
                     PermissionDecision::Allow | PermissionDecision::AllowAlways => {
                         if decision == PermissionDecision::AllowAlways {
                             self.executor.permissions().grant_always(&tc.function.name);
@@ -909,26 +955,28 @@ impl Agent {
                         let start = std::time::Instant::now();
 
                         // Dispatch to MCP or built-in executor
-                        let result = if is_mcp {
+                        let result: anvil_tools::ToolOutput = if is_mcp {
                             self.mcp
                                 .call_tool(&tc.function.name, &args)
                                 .await
                                 .unwrap_or_else(|e| format!("error: {e}"))
+                                .into()
                         } else {
                             self.executor
                                 .execute(&tc.function.name, &args)
                                 .await
-                                .unwrap_or_else(|e| format!("error: {e}"))
+                                .unwrap_or_else(|e| format!("error: {e}").into())
                         };
 
                         let duration = start.elapsed();
+                        let result_text = result.text().to_string();
 
                         self.store.save_tool_call(&ToolCallEntry {
                             session_id: &self.session_id,
                             message_id: &msg_id,
                             tool_name: &tc.function.name,
                             arguments: &tc.function.arguments,
-                            result: Some(&result),
+                            result: Some(&result_text),
                             duration_ms: Some(duration.as_millis() as i64),
                             permission,
                         })?;
@@ -936,11 +984,12 @@ impl Agent {
                         let _ = event_tx
                             .send(AgentEvent::ToolResult {
                                 name: tc.function.name.clone(),
-                                result: result.clone(),
+                                result,
                             })
                             .await;
 
-                        result
+                        // Re-create ToolOutput from text for message history
+                        result_text.into()
                     }
                     PermissionDecision::Deny => {
                         self.store.save_tool_call(&ToolCallEntry {
@@ -953,16 +1002,17 @@ impl Agent {
                             permission: "denied",
                         })?;
 
-                        "Tool execution denied by user.".to_string()
+                        "Tool execution denied by user.".to_string().into()
                     }
                 };
 
-                let tool_result_msg = ChatMessage::tool_result(&tc.id, &result);
+                let result_text = result.into_text();
+                let tool_result_msg = ChatMessage::tool_result(&tc.id, &result_text);
                 self.messages.push(tool_result_msg);
                 self.store.save_message(
                     &self.session_id,
                     "tool",
-                    Some(&result),
+                    Some(&result_text),
                     None,
                     Some(&tc.id),
                 )?;

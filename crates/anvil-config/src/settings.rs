@@ -74,6 +74,17 @@ pub struct AgentSettings {
     /// Replace the entire system prompt. Use `.anvil/context.md` for additions instead.
     #[serde(default)]
     pub system_prompt_override: Option<String>,
+    /// Restricted workspace path for kids personas. When a kids persona is
+    /// active and this is set, all tool paths resolve relative to this
+    /// directory instead of the general workspace. Like a governor valve
+    /// that limits the operating range of a hydraulic cylinder.
+    #[serde(default)]
+    pub kids_workspace: Option<String>,
+    /// Shell command allowlist for kids personas. When a kids persona is
+    /// active, only commands whose first word matches this list are allowed.
+    /// Defaults to a safe set if not specified.
+    #[serde(default)]
+    pub kids_allowed_commands: Option<Vec<String>>,
 }
 
 /// Controls tool execution behavior — timeouts and output size limits.
@@ -100,6 +111,8 @@ impl Default for AgentSettings {
             context_window: default_context_window(),
             auto_compact_threshold: default_auto_compact_threshold(),
             system_prompt_override: None,
+            kids_workspace: None,
+            kids_allowed_commands: None,
         }
     }
 }

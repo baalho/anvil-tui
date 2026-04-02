@@ -1,4 +1,7 @@
-use anvil_agent::{Agent, AgentEvent, AutonomousConfig, AutonomousRunner, IterationResult};
+use anvil_agent::{
+    AchievementStore, Agent, AgentEvent, AutonomousConfig, AutonomousRunner, IterationResult,
+    SessionTracker,
+};
 use anvil_llm::TokenUsage;
 use anvil_tools::PermissionDecision;
 use anyhow::Result;
@@ -39,6 +42,9 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
 
     let stdin = io::stdin();
     let mut cumulative_usage = TokenUsage::default();
+    let mut achievement_store = AchievementStore::load(agent.workspace());
+    let mut session_tracker = SessionTracker::new();
+    let mut last_message_time: Option<std::time::Instant> = None;
     let mut agent_slot: Option<Agent> = Some(agent);
     let mut managed_backend: Option<crate::backend::BackendProcess> = None;
 
@@ -139,6 +145,31 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         let trimmed = input.trim();
         if trimmed.is_empty() {
             continue;
+        }
+
+        // Rate-limit user messages when a kids persona is active.
+        // Slash commands bypass the cooldown so /help always works.
+        if !trimmed.starts_with('/') {
+            if let Some(persona) = agent.persona() {
+                if anvil_agent::is_kids_persona(&persona.key) {
+                    if let Some(last) = last_message_time {
+                        const KIDS_INPUT_COOLDOWN_SECS: u64 = 2;
+                        let elapsed = last.elapsed();
+                        if elapsed.as_secs() < KIDS_INPUT_COOLDOWN_SECS {
+                            let persona_name = persona.name.clone();
+                            execute!(
+                                io::stdout(),
+                                SetForegroundColor(Color::Magenta),
+                                Print(format!(
+                                    "  ✨ {persona_name} is still thinking! Wait a moment...\n"
+                                )),
+                                ResetColor,
+                            )?;
+                            continue;
+                        }
+                    }
+                }
+            }
         }
 
         if trimmed.starts_with('/') {
@@ -315,6 +346,11 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(64);
         let (perm_tx, perm_rx) = mpsc::channel::<PermissionDecision>(1);
 
+        // Track user message for achievements and rate limiting
+        last_message_time = Some(std::time::Instant::now());
+        let mut pending_triggers: Vec<&'static str> = Vec::new();
+        pending_triggers.extend(session_tracker.record_message());
+
         let prompt_owned = trimmed.to_string();
         let mut moved_agent = agent_slot.take().unwrap();
         let turn_cancel = cancel.clone();
@@ -325,11 +361,12 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
             (moved_agent, result)
         });
 
-        // Spinner while waiting for first LLM token
+        // Spinner with elapsed time while waiting for first LLM token
         let spinner_cancel = CancellationToken::new();
         let spinner_cancel_clone = spinner_cancel.clone();
         let spinner_handle = tokio::spawn(async move {
             const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let start = std::time::Instant::now();
             let mut i = 0;
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(80));
             loop {
@@ -337,11 +374,18 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                     _ = spinner_cancel_clone.cancelled() => break,
                     _ = interval.tick() => {
                         let frame = FRAMES[i % FRAMES.len()];
+                        let elapsed = start.elapsed().as_secs();
+                        let timer = if elapsed > 0 {
+                            format!(" ({elapsed}s)")
+                        } else {
+                            String::new()
+                        };
                         let _ = execute!(
                             io::stdout(),
                             crossterm::cursor::MoveToColumn(0),
+                            crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
                             SetForegroundColor(Color::DarkGrey),
-                            Print(format!("  {frame} thinking...")),
+                            Print(format!("  {frame} thinking...{timer}")),
                             ResetColor,
                         );
                         let _ = io::stdout().flush();
@@ -360,6 +404,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         let mut needs_newline = false;
         let mut spinner_stopped = false;
         let mut spinner_handle = Some(spinner_handle);
+        let mut in_thinking_block = false;
         while let Some(event) = event_rx.recv().await {
             // Stop spinner on first event
             if !spinner_stopped {
@@ -369,21 +414,37 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                 }
                 spinner_stopped = true;
             }
+
+            // Close thinking box when transitioning to non-thinking events
+            if in_thinking_block && !matches!(event, AgentEvent::ThinkingDelta(_)) {
+                execute!(
+                    io::stdout(),
+                    SetForegroundColor(Color::DarkGrey),
+                    Print("\n  ╰─\n"),
+                    ResetColor,
+                )?;
+                in_thinking_block = false;
+                needs_newline = false;
+            }
+
             match event {
                 AgentEvent::ThinkingDelta(text) => {
-                    if !needs_newline {
+                    if !in_thinking_block {
                         execute!(
                             io::stdout(),
-                            SetForegroundColor(Color::Cyan),
-                            Print("anvil> "),
+                            SetForegroundColor(Color::DarkGrey),
+                            Print("  ╭─ thinking\n  │ "),
                             ResetColor,
                         )?;
+                        in_thinking_block = true;
                         needs_newline = true;
                     }
+                    // Prefix each newline with box-drawing continuation
+                    let prefixed = text.replace('\n', "\n  │ ");
                     execute!(
                         io::stdout(),
                         SetForegroundColor(Color::DarkGrey),
-                        Print(&text),
+                        Print(&prefixed),
                         ResetColor,
                     )?;
                     io::stdout().flush()?;
@@ -419,13 +480,17 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         ResetColor,
                     )?;
 
+                    // Track tool usage for achievements
+                    pending_triggers.extend(session_tracker.record_tool_call(&name, &arguments));
+
                     let decision = prompt_permission(&name, &arguments)?;
                     let _ = perm_tx.send(decision).await;
                 }
                 AgentEvent::ToolResult { name, result } => {
                     let icon = tool_icon(&name);
-                    let lines = result.lines().count();
-                    let chars = result.len();
+                    let text = result.text();
+                    let lines = text.lines().count();
+                    let chars = text.len();
                     execute!(
                         io::stdout(),
                         SetForegroundColor(Color::DarkGrey),
@@ -443,6 +508,22 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         println!();
                         needs_newline = false;
                     }
+
+                    // Unlock any achievements triggered during this turn
+                    let agent = agent_slot.as_ref().expect("agent lost");
+                    let persona = agent.persona().map(|p| p.key.as_str());
+                    for key in pending_triggers.drain(..) {
+                        if let Some(badge) = achievement_store.unlock(key, persona) {
+                            let msg = AchievementStore::format_unlock(badge, persona);
+                            execute!(
+                                io::stdout(),
+                                SetForegroundColor(Color::Yellow),
+                                Print(format!("  {msg}\n")),
+                                ResetColor,
+                            )?;
+                        }
+                    }
+
                     println!();
                 }
                 AgentEvent::AutoCompacted {
@@ -880,7 +961,7 @@ async fn run_ralph_loop(
                     turn_content.push_str(&text);
                 }
                 AgentEvent::ToolResult { name, result } => {
-                    let lines = result.lines().count();
+                    let lines = result.text().lines().count();
                     execute!(
                         io::stdout(),
                         SetForegroundColor(Color::DarkGrey),

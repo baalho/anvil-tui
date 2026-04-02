@@ -194,7 +194,9 @@ async fn tool_call_executes_and_returns_result() {
     let tool_results: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
-            AgentEvent::ToolResult { name, result } => Some((name.clone(), result.clone())),
+            AgentEvent::ToolResult { name, result } => {
+                Some((name.clone(), result.text().to_string()))
+            }
             _ => None,
         })
         .collect();
@@ -299,7 +301,9 @@ async fn input_validation_returns_error_to_llm() {
     let tool_results: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
-            AgentEvent::ToolResult { name, result } => Some((name.clone(), result.clone())),
+            AgentEvent::ToolResult { name, result } => {
+                Some((name.clone(), result.text().to_string()))
+            }
             _ => None,
         })
         .collect();

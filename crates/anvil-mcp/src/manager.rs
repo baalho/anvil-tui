@@ -20,6 +20,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
+/// Tracks child process IDs for synchronous cleanup in `Drop`.
+/// Uses `std::sync::Mutex` because `Drop` is synchronous — we can't
+/// use tokio's async Mutex there.
+type PidRegistry = std::sync::Mutex<Vec<u32>>;
+
 /// A discovered tool from an MCP server.
 #[derive(Debug, Clone)]
 pub struct McpTool {
@@ -49,8 +54,16 @@ struct McpConnection {
 ///
 /// Thread-safe via internal `Mutex` — the manager is shared between
 /// the agent loop (tool dispatch) and the UI (slash commands).
+///
+/// Implements `Drop` to kill all child processes synchronously, preventing
+/// zombie processes if Anvil panics. On Unix, child processes are spawned
+/// in their own process group (`setsid`) so `kill(-pgid)` cleans up the
+/// entire process tree — like a pneumatic exhaust valve that vents all
+/// pressure when the control system fails.
 pub struct McpManager {
     connections: Mutex<HashMap<String, McpConnection>>,
+    /// PIDs tracked for synchronous cleanup in Drop.
+    child_pids: PidRegistry,
 }
 
 impl McpManager {
@@ -58,6 +71,7 @@ impl McpManager {
     /// Servers that fail to connect are logged and skipped (not fatal).
     pub async fn new(configs: &[McpServerConfig]) -> Self {
         let mut connections = HashMap::new();
+        let mut pids = Vec::new();
 
         for config in configs {
             match Self::connect(config).await {
@@ -67,6 +81,9 @@ impl McpManager {
                         config.name,
                         conn.tools.len()
                     );
+                    if let Some(pid) = conn.child.id() {
+                        pids.push(pid);
+                    }
                     connections.insert(config.name.clone(), conn);
                 }
                 Err(e) => {
@@ -77,6 +94,7 @@ impl McpManager {
 
         Self {
             connections: Mutex::new(connections),
+            child_pids: std::sync::Mutex::new(pids),
         }
     }
 
@@ -84,6 +102,7 @@ impl McpManager {
     pub fn empty() -> Self {
         Self {
             connections: Mutex::new(HashMap::new()),
+            child_pids: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -189,16 +208,37 @@ impl McpManager {
             .collect()
     }
 
-    /// Reconnect a server by name.
+    /// Reconnect a server by name. Kills the old process and spawns a fresh one.
     pub async fn restart(&self, name: &str) -> Result<()> {
         let mut conns = self.connections.lock().await;
-        if let Some(mut old) = conns.remove(name) {
-            let _ = old.child.kill().await;
-        }
+        let config = match conns.remove(name) {
+            Some(mut old) => {
+                // Remove old PID from registry
+                if let Some(old_pid) = old.child.id() {
+                    if let Ok(mut pids) = self.child_pids.lock() {
+                        pids.retain(|&p| p != old_pid);
+                    }
+                }
+                let _ = old.child.kill().await;
+                old.config
+            }
+            None => bail!("MCP server '{name}' not found"),
+        };
 
-        // Find the config from existing connections or error
-        // We need the original config — store it in the connection
-        bail!("restart requires the original config; use McpManager::new() to reconnect");
+        let conn = Self::connect(&config).await?;
+        // Register new PID
+        if let Some(new_pid) = conn.child.id() {
+            if let Ok(mut pids) = self.child_pids.lock() {
+                pids.push(new_pid);
+            }
+        }
+        tracing::info!(
+            "MCP server '{}' restarted ({} tools)",
+            config.name,
+            conn.tools.len()
+        );
+        conns.insert(config.name.clone(), conn);
+        Ok(())
     }
 
     /// Gracefully shut down all servers.
@@ -219,6 +259,17 @@ impl McpManager {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+
+        // Spawn in a new process group so kill(-pgid) cleans up the
+        // entire tree. Like giving each MCP server its own pneumatic
+        // circuit — when we vent one, we vent all its sub-actuators.
+        #[cfg(unix)]
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
 
         for (key, val) in &config.env {
             cmd.env(key, val);
@@ -242,7 +293,7 @@ impl McpManager {
                 "capabilities": {},
                 "clientInfo": {
                     "name": "anvil",
-                    "version": "1.1.0"
+                    "version": "1.4.0"
                 }
             }
         });
@@ -381,6 +432,36 @@ impl McpManager {
     }
 }
 
+impl Drop for McpManager {
+    fn drop(&mut self) {
+        let pids = match self.child_pids.lock() {
+            Ok(pids) => pids.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+
+        for pid in pids {
+            #[cfg(unix)]
+            {
+                let pid_i32 = pid as i32;
+                // Try process group kill first (cleans up child-of-child).
+                // setsid() made each child its own group leader.
+                // Then kill the process directly as a fallback.
+                unsafe {
+                    libc::kill(-pid_i32, libc::SIGKILL);
+                    libc::kill(pid_i32, libc::SIGKILL);
+                }
+            }
+
+            #[cfg(not(unix))]
+            {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/F", "/PID", &pid.to_string()])
+                    .output();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,5 +559,43 @@ mod tests {
         assert!(manager.tools().await.is_empty());
         assert!(manager.tool_definitions().await.is_empty());
         assert!(manager.server_status().await.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::zombie_processes)] // Intentional: testing that Drop kills the process
+    fn drop_kills_registered_pids() {
+        // Spawn a long-running process, register its PID, then drop the manager.
+        let child = std::process::Command::new("sleep")
+            .arg("300")
+            .spawn()
+            .expect("failed to spawn sleep");
+        let pid = child.id();
+
+        // Verify the process is alive before drop
+        #[cfg(unix)]
+        {
+            let alive = unsafe { libc::kill(pid as i32, 0) };
+            assert_eq!(alive, 0, "process should be alive before Drop");
+        }
+
+        let manager = McpManager {
+            connections: Mutex::new(HashMap::new()),
+            child_pids: std::sync::Mutex::new(vec![pid]),
+        };
+
+        // Drop the manager — should kill the process
+        drop(manager);
+
+        // Reap the zombie and verify it was killed
+        #[cfg(unix)]
+        {
+            let mut status: i32 = 0;
+            unsafe {
+                libc::waitpid(pid as i32, &mut status, 0);
+            }
+            // After waitpid, kill(pid, 0) should fail with ESRCH
+            let probe = unsafe { libc::kill(pid as i32, 0) };
+            assert_eq!(probe, -1, "process should be fully reaped after Drop");
+        }
     }
 }

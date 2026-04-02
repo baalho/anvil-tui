@@ -72,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "anvil"
-version = "1.2.0"
+version = "1.4.0"
 dependencies = [
  "anvil-agent",
  "anvil-config",
@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-agent"
-version = "1.2.0"
+version = "1.4.0"
 dependencies = [
  "anvil-config",
  "anvil-llm",
@@ -102,6 +102,7 @@ dependencies = [
  "anvil-tools",
  "anyhow",
  "chrono",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",
@@ -116,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-config"
-version = "1.2.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -130,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-llm"
-version = "1.2.0"
+version = "1.4.0"
 dependencies = [
  "anvil-config",
  "anyhow",
@@ -149,9 +150,10 @@ dependencies = [
 
 [[package]]
 name = "anvil-mcp"
-version = "1.2.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
@@ -162,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-tools"
-version = "1.2.0"
+version = "1.4.0"
 dependencies = [
  "anvil-config",
  "anyhow",

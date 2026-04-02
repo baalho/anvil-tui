@@ -136,6 +136,15 @@ pub fn find_persona(key: &str) -> Option<Persona> {
     builtin_personas().into_iter().find(|p| p.key == key_lower)
 }
 
+/// Kids personas get sandbox restrictions (workspace boundary, shell allowlist).
+/// The homelab persona is for infrastructure work and is NOT restricted.
+const KIDS_PERSONA_KEYS: &[&str] = &["sparkle", "bolt", "codebeard"];
+
+/// Check if a persona key is a kids persona (subject to sandbox restrictions).
+pub fn is_kids_persona(key: &str) -> bool {
+    KIDS_PERSONA_KEYS.contains(&key.to_lowercase().as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +199,16 @@ mod tests {
         assert!(homelab.prompt.contains("deploy.fish"));
         assert!(homelab.prompt.contains("ssh"));
         assert!(homelab.prompt.contains("Tailscale"));
+    }
+
+    #[test]
+    fn kids_personas_identified_correctly() {
+        assert!(is_kids_persona("sparkle"));
+        assert!(is_kids_persona("Sparkle"));
+        assert!(is_kids_persona("bolt"));
+        assert!(is_kids_persona("codebeard"));
+        // homelab is NOT a kids persona
+        assert!(!is_kids_persona("homelab"));
+        assert!(!is_kids_persona("nonexistent"));
     }
 }

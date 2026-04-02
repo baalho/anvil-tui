@@ -1,6 +1,7 @@
 pub mod achievements;
 mod agent;
 pub mod autonomous;
+mod json_filter;
 pub mod memory;
 pub mod persona;
 pub mod routing;
@@ -13,7 +14,7 @@ pub use achievements::{AchievementStore, SessionTracker};
 pub use agent::{Agent, AgentEvent, CompactionResult};
 pub use autonomous::{AutonomousConfig, AutonomousRunner, IterationResult};
 pub use memory::MemoryStore;
-pub use persona::{builtin_personas, find_persona, Persona};
+pub use persona::{builtin_personas, find_persona, is_kids_persona, Persona};
 pub use routing::ModelRouter;
 pub use session::{
     SearchResult, Session, SessionStatus, SessionStore, StoredMessage, ToolCallEntry,

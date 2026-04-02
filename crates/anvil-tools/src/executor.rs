@@ -17,6 +17,20 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// Kids sandbox configuration — restricts workspace and shell commands.
+#[derive(Debug, Clone)]
+pub struct KidsSandbox {
+    /// Restricted workspace path (overrides general workspace for file tools).
+    pub workspace: PathBuf,
+    /// Allowed shell commands (first word of command string).
+    pub allowed_commands: Vec<String>,
+}
+
+/// Default safe commands for kids mode.
+pub const DEFAULT_KIDS_COMMANDS: &[&str] = &[
+    "echo", "cat", "ls", "python3", "python", "cargo", "rustc", "node", "npm", "git",
+];
+
 /// Executes tool calls from the LLM, enforcing workspace boundaries and output limits.
 ///
 /// Uses `Arc` for shared state so the executor can be cloned cheaply for
@@ -34,6 +48,8 @@ pub struct ToolExecutor {
     /// Cache of file contents keyed by canonical path.
     /// Invalidated when file_write or file_edit modifies a file.
     file_cache: Arc<Mutex<HashMap<PathBuf, String>>>,
+    /// Kids sandbox — when active, restricts workspace and shell commands.
+    kids_sandbox: Arc<Mutex<Option<KidsSandbox>>>,
 }
 
 impl ToolExecutor {
@@ -49,6 +65,7 @@ impl ToolExecutor {
             },
             extra_env: Vec::new(),
             file_cache: Arc::new(Mutex::new(HashMap::new())),
+            kids_sandbox: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -72,6 +89,43 @@ impl ToolExecutor {
         &self.extra_env
     }
 
+    /// Activate kids sandbox mode with a restricted workspace and command allowlist.
+    pub fn set_kids_sandbox(&self, sandbox: KidsSandbox) {
+        *self.kids_sandbox.lock().unwrap() = Some(sandbox);
+    }
+
+    /// Deactivate kids sandbox mode.
+    pub fn clear_kids_sandbox(&self) {
+        *self.kids_sandbox.lock().unwrap() = None;
+    }
+
+    /// Get the effective workspace (kids sandbox workspace if active, else general).
+    fn effective_workspace(&self) -> PathBuf {
+        if let Some(sandbox) = self.kids_sandbox.lock().unwrap().as_ref() {
+            sandbox.workspace.clone()
+        } else {
+            self.workspace.clone()
+        }
+    }
+
+    /// Check if a shell command is allowed under the current sandbox.
+    /// Returns Ok(()) if allowed, Err with friendly message if blocked.
+    fn check_shell_allowlist(&self, command: &str) -> Result<()> {
+        let sandbox = self.kids_sandbox.lock().unwrap();
+        if let Some(sandbox) = sandbox.as_ref() {
+            let first_word = command.split_whitespace().next().unwrap_or("");
+            // Strip path prefix (e.g., /usr/bin/python3 -> python3)
+            let binary = first_word.rsplit('/').next().unwrap_or(first_word);
+            if !sandbox.allowed_commands.iter().any(|c| c == binary) {
+                bail!(
+                    "✨ That command isn't available in kids mode! Try one of: {}",
+                    sandbox.allowed_commands.join(", ")
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Execute a tool call and return the (possibly truncated) output.
     ///
     /// # Tool dispatch
@@ -83,37 +137,43 @@ impl ToolExecutor {
     /// Required arguments are checked before dispatch. Missing or empty
     /// required args produce clear error messages that help the LLM
     /// self-correct on the next attempt.
-    pub async fn execute(&self, tool_name: &str, args: &Value) -> Result<String> {
+    pub async fn execute(&self, tool_name: &str, args: &Value) -> Result<crate::ToolOutput> {
         // Validate required arguments before dispatch
         self.validate_args(tool_name, args)?;
 
+        let workspace = self.effective_workspace();
+
         let result = match tool_name {
-            "file_read" => tools::file_read(&self.workspace, args).await?,
+            "file_read" => tools::file_read(&workspace, args).await?,
             "file_write" => {
-                let result = tools::file_write(&self.workspace, args).await?;
+                let result = tools::file_write(&workspace, args).await?;
                 self.invalidate_cache(args);
                 result
             }
             "file_edit" => {
-                let result = tools::file_edit(&self.workspace, args).await?;
+                let result = tools::file_edit(&workspace, args).await?;
                 self.invalidate_cache(args);
                 result
             }
             "shell" => {
-                tools::shell(&self.workspace, args, self.shell_timeout, &self.extra_env).await?
+                // Check allowlist before executing shell commands
+                if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                    self.check_shell_allowlist(cmd)?;
+                }
+                tools::shell(&workspace, args, self.shell_timeout, &self.extra_env).await?
             }
-            "grep" => tools::grep(&self.workspace, args).await?,
-            "ls" => tools::ls(&self.workspace, args).await?,
-            "find" => tools::find(&self.workspace, args).await?,
-            "git_status" => tools::git_status(&self.workspace, args).await?,
-            "git_diff" => tools::git_diff(&self.workspace, args).await?,
-            "git_log" => tools::git_log(&self.workspace, args).await?,
-            "git_commit" => tools::git_commit(&self.workspace, args).await?,
+            "grep" => tools::grep(&workspace, args).await?,
+            "ls" => tools::ls(&workspace, args).await?,
+            "find" => tools::find(&workspace, args).await?,
+            "git_status" => tools::git_status(&workspace, args).await?,
+            "git_diff" => tools::git_diff(&workspace, args).await?,
+            "git_log" => tools::git_log(&workspace, args).await?,
+            "git_commit" => tools::git_commit(&workspace, args).await?,
             _ => bail!("unknown tool: {tool_name}"),
         };
 
         let truncated = truncation::truncate_output(&result, &self.truncation_config);
-        Ok(truncated.content)
+        Ok(crate::ToolOutput::Text(truncated.content))
     }
 
     /// Invalidate cached file content when a file is modified.

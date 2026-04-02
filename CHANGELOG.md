@@ -5,6 +5,60 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [v1.4.0] — 2026-04-02 — Sparkle Edition
+
+### Added
+- **JSON extraction filter** (`json_filter.rs`) — regex-based extraction
+  of JSON from persona-contaminated LLM output. Handles persona bleed
+  where local models wrap tool call arguments in conversational text.
+- **Kids sandbox** — config-driven `kids_workspace` path and shell
+  command allowlist when a kids persona is active. Defense-in-depth:
+  file tools resolve paths relative to the restricted workspace, and
+  shell commands are checked against an allowlist before execution.
+- **MCP zombie process prevention** — `McpManager` now implements
+  `Drop` with `SIGKILL` cleanup. Child processes are spawned with
+  `setsid()` so `kill(-pgid)` cleans up the entire process tree.
+- **ToolOutput enum** — tools can return `Text` or `Structured` output.
+  `Structured` carries both human-readable text (for LLM conversation)
+  and machine-readable `serde_json::Value` (for future STEM rendering).
+- **Input debouncing** — 2-second cooldown between user messages when a
+  kids persona is active. Prevents button-mashing from flooding the
+  agent with rapid-fire LLM requests.
+- **System prompt layer contract test** — enforces the KV cache
+  optimization ordering (static → dynamic) with a test that fails if
+  layer order is violated.
+- `/inventory` slash command — view hosts from `.anvil/inventory.toml`
+
+### Changed
+- `ToolExecutor::execute()` returns `ToolOutput` instead of `String`
+- `AgentEvent::ToolResult` carries `ToolOutput` instead of `String`
+- 15 slash commands (added `/inventory`)
+
+## [v1.3.0] — 2026-04-02
+
+### Added
+- `/inventory` slash command — view hosts from `.anvil/inventory.toml`
+- Achievements wired into interactive mode — badges unlock during sessions
+- Thinking block box-drawing visualization (`╭─ thinking` / `│` / `╰─`)
+- Spinner shows elapsed time (`⠋ thinking... (3s)`)
+- MCP server restart (`/mcp restart <name>`)
+- Ollama context warning when `OLLAMA_NUM_CTX` is not set
+- E2E smoke test scripts (`scripts/test-e2e.sh`, `scripts/test-e2e.ps1`)
+
+### Changed
+- Hooks are now platform-agnostic — discovers `.sh`, `.ps1`, `.cmd`, `.bat` by platform priority
+- 15 slash commands (was 14, added `/inventory`)
+
+### Removed
+- Dead TUI mode (`app.rs`, 781 lines) — was decoupled and unused
+- Unused `DynTool` trait system (`tool_trait.rs`, 396 lines)
+- `--tui` CLI flag and `docs` subcommand
+- Help topic markdown files (`help/*.md`)
+
+### Fixed
+- `AchievementStore::load` was never called in interactive mode (only in deleted app.rs)
+- MCP restart was a stub that always returned an error
+
 ## [v1.2.0] — 2026-04-02
 
 ### Added

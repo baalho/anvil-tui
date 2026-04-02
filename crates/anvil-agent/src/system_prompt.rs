@@ -37,10 +37,17 @@ const COMPATIBILITY_FILES: &[&str] = &[
 
 /// Build the system prompt with layered construction for KV cache efficiency.
 ///
-/// # Layer ordering (top = most stable, bottom = most dynamic)
+/// # Layer Contract
 ///
-/// Layers are ordered so the prefix is maximally stable across turns.
-/// MLX and llama-server KV caches can reuse the prefix without recomputation.
+/// Layers MUST be ordered from most-stable to most-dynamic so the prefix
+/// is maximally reusable across turns. MLX and llama-server KV caches
+/// store the key-value pairs for each token position; if the prefix is
+/// identical between turns, the cache is reused without recomputation.
+/// Breaking this ordering is like rearranging the intake manifold on a
+/// turbo engine — the flow path must go static → dynamic or you get
+/// backpressure (cache misses) on every turn.
+///
+/// **Do not insert dynamic content above static content.**
 ///
 /// 1. **Persona** (static per session) — character voice instructions
 /// 2. **Base prompt + rules** (static) — core identity and tool list
@@ -50,6 +57,7 @@ const COMPATIBILITY_FILES: &[&str] = &[
 ///
 /// The persona is injected by `Agent::rebuild_system_prompt()` as a prefix
 /// before this function's output, so it's always at the very top.
+/// This ordering is enforced by the `layer_contract_ordering` test.
 pub fn build_system_prompt(
     workspace: &Path,
     override_prompt: Option<&str>,
@@ -275,5 +283,75 @@ mod tests {
                 "memory should appear after environment"
             );
         }
+    }
+
+    /// Enforces the full layer contract: every layer marker must appear
+    /// in strict ascending order. If a future change inserts dynamic
+    /// content above static content, this test fails — protecting KV
+    /// cache prefix stability.
+    #[test]
+    fn layer_contract_ordering() {
+        let dir = TempDir::new().unwrap();
+        let anvil_dir = dir.path().join(".anvil");
+        std::fs::create_dir_all(&anvil_dir).unwrap();
+        std::fs::write(anvil_dir.join("context.md"), "LAYER4_CONTEXT_MARKER").unwrap();
+
+        let memory_dir = anvil_dir.join("memory");
+        std::fs::create_dir_all(&memory_dir).unwrap();
+        std::fs::write(
+            memory_dir.join("test.md"),
+            "---\ncategory: patterns\n---\nLAYER5_MEMORY_MARKER",
+        )
+        .unwrap();
+
+        let skills = vec![Skill {
+            key: "contract".to_string(),
+            name: "Contract Test".to_string(),
+            description: "test".to_string(),
+            content: "LAYER3_SKILL_MARKER".to_string(),
+            category: None,
+            tags: Vec::new(),
+            required_env: Vec::new(),
+            verify_command: None,
+            depends: Vec::new(),
+        }];
+
+        let prompt = build_system_prompt(dir.path(), None, "test-model", &skills);
+
+        // Layer 2: base prompt (static)
+        let layer2 = prompt.find("You are Anvil").expect("base prompt missing");
+        // Layer 3: skills (semi-static)
+        let layer3 = prompt
+            .find("LAYER3_SKILL_MARKER")
+            .expect("skill marker missing");
+        // Layer 4: project context (semi-static)
+        let layer4 = prompt
+            .find("LAYER4_CONTEXT_MARKER")
+            .expect("context marker missing");
+        // Layer 5a: environment (dynamic)
+        let layer5a = prompt
+            .find("## Environment")
+            .expect("environment section missing");
+        // Layer 5b: memory (dynamic)
+        let layer5b = prompt
+            .find("LAYER5_MEMORY_MARKER")
+            .expect("memory marker missing");
+
+        assert!(
+            layer2 < layer3,
+            "Layer 2 (base) must precede Layer 3 (skills)"
+        );
+        assert!(
+            layer3 < layer4,
+            "Layer 3 (skills) must precede Layer 4 (context)"
+        );
+        assert!(
+            layer4 < layer5a,
+            "Layer 4 (context) must precede Layer 5 (environment)"
+        );
+        assert!(
+            layer5a < layer5b,
+            "Layer 5a (environment) must precede Layer 5b (memory)"
+        );
     }
 }

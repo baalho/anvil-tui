@@ -58,6 +58,7 @@ pub async fn handle_command(
         "/skill" => CommandResult::Handled(skill_command(agent, arg)),
         "/mcp" => CommandResult::Handled(mcp_command(agent, arg).await),
         "/persona" => CommandResult::Handled(persona_command(agent, arg)),
+        "/inventory" => CommandResult::Handled(inventory_command(agent)),
         _ => CommandResult::Unknown(cmd.to_string()),
     }
 }
@@ -112,6 +113,7 @@ fn help_text() -> String {
                     "Autonomous mode (Ralph Loop)",
                 ),
                 ("/mcp", "List MCP servers and tools"),
+                ("/inventory", "Show hosts from inventory.toml"),
             ],
         ),
     ];
@@ -303,7 +305,57 @@ async fn mcp_command(agent: &Agent, arg: &str) -> String {
         return "all MCP servers shut down".to_string();
     }
 
-    format!("unknown subcommand '{arg}'. usage: /mcp, /mcp shutdown")
+    if let Some(name) = arg.strip_prefix("restart ") {
+        let name = name.trim();
+        return match mcp.restart(name).await {
+            Ok(()) => format!("MCP server '{name}' restarted"),
+            Err(e) => format!("restart failed: {e}"),
+        };
+    }
+
+    format!("unknown subcommand '{arg}'. usage: /mcp, /mcp restart <name>, /mcp shutdown")
+}
+
+/// Handle `/inventory` — show hosts from `.anvil/inventory.toml`.
+fn inventory_command(agent: &Agent) -> String {
+    let inventory = anvil_config::load_inventory(agent.workspace());
+    if inventory.hosts.is_empty() {
+        return "no hosts in inventory. add hosts in .anvil/inventory.toml".to_string();
+    }
+
+    let mut out = format!("{} host(s):\n", inventory.hosts.len());
+    // Column widths
+    let nw = inventory
+        .hosts
+        .iter()
+        .map(|h| h.name.len())
+        .max()
+        .unwrap_or(0);
+    let tw = inventory
+        .hosts
+        .iter()
+        .map(|h| h.tailscale_name.len())
+        .max()
+        .unwrap_or(0);
+    let rw = inventory
+        .hosts
+        .iter()
+        .map(|h| h.container_runtime.len())
+        .max()
+        .unwrap_or(0);
+
+    for h in &inventory.hosts {
+        let services = if h.services.is_empty() {
+            "—".to_string()
+        } else {
+            h.services.join(", ")
+        };
+        out.push_str(&format!(
+            "\n  {:<nw$}  {:<tw$}  {:<rw$}  {}",
+            h.name, h.tailscale_name, h.container_runtime, services
+        ));
+    }
+    out
 }
 
 /// Handle `/persona` — list, activate, or deactivate character personas.
