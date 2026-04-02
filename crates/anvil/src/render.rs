@@ -12,7 +12,6 @@
 //! to stdout. Each renderer implementation decides how to display content
 //! based on the output type and terminal capabilities.
 
-use anvil_tools::ToolOutput;
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use std::io::{self, Write};
 
@@ -25,8 +24,17 @@ pub trait Renderer {
     /// Render a thinking block delta (chain-of-thought).
     fn render_thinking_delta(&self, text: &str);
 
+    /// Render the start of a thinking block (box-drawing open).
+    fn render_thinking_start(&self);
+
+    /// Render the end of a thinking block (box-drawing close).
+    fn render_thinking_end(&self);
+
+    /// Render a tool call that's about to execute.
+    fn render_tool_pending(&self, tool_name: &str, icon: &str, args_preview: &str);
+
     /// Render a tool execution result.
-    fn render_tool_result(&self, tool_name: &str, output: &ToolOutput);
+    fn render_tool_result(&self, tool_name: &str, icon: &str, lines: usize, chars: usize);
 
     /// Render a command result (slash command output).
     fn render_command_result(&self, text: &str);
@@ -59,37 +67,53 @@ impl Renderer for TerminalRenderer {
     }
 
     fn render_thinking_delta(&self, text: &str) {
+        // Prefix each newline with box-drawing continuation
+        let prefixed = text.replace('\n', "\n  │ ");
         let _ = crossterm::execute!(
             io::stdout(),
             SetForegroundColor(Color::DarkGrey),
-            Print(text),
+            Print(&prefixed),
+            ResetColor,
+        );
+        let _ = io::stdout().flush();
+    }
+
+    fn render_thinking_start(&self) {
+        let _ = crossterm::execute!(
+            io::stdout(),
+            SetForegroundColor(Color::DarkGrey),
+            Print("  ╭─ thinking\n  │ "),
             ResetColor,
         );
     }
 
-    fn render_tool_result(&self, tool_name: &str, output: &ToolOutput) {
-        match output {
-            ToolOutput::Text(text) => {
-                let preview = truncate_for_display(text, 200);
-                let _ = crossterm::execute!(
-                    io::stdout(),
-                    SetForegroundColor(Color::DarkGrey),
-                    Print(format!("  ↳ {tool_name}: {preview}\n")),
-                    ResetColor,
-                );
-            }
-            ToolOutput::Structured {
-                text, content_type, ..
-            } => {
-                let preview = truncate_for_display(text, 200);
-                let _ = crossterm::execute!(
-                    io::stdout(),
-                    SetForegroundColor(Color::DarkGrey),
-                    Print(format!("  ↳ {tool_name} [{content_type}]: {preview}\n")),
-                    ResetColor,
-                );
-            }
-        }
+    fn render_thinking_end(&self) {
+        let _ = crossterm::execute!(
+            io::stdout(),
+            SetForegroundColor(Color::DarkGrey),
+            Print("\n  ╰─\n"),
+            ResetColor,
+        );
+    }
+
+    fn render_tool_pending(&self, tool_name: &str, icon: &str, args_preview: &str) {
+        let _ = crossterm::execute!(
+            io::stdout(),
+            SetForegroundColor(Color::Cyan),
+            Print(format!("  {icon} {tool_name}")),
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!(" ─ {args_preview}\n")),
+            ResetColor,
+        );
+    }
+
+    fn render_tool_result(&self, tool_name: &str, icon: &str, lines: usize, chars: usize) {
+        let _ = crossterm::execute!(
+            io::stdout(),
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!("  {icon} {tool_name}: {lines} lines, {chars} chars\n")),
+            ResetColor,
+        );
     }
 
     fn render_command_result(&self, text: &str) {

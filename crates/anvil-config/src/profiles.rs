@@ -482,6 +482,37 @@ notes = "Unsloth warns against Ollama due to chat template bugs. Use llama-serve
 strengths = ["creative", "tool-calling"]
 "#,
     ),
+    (
+        "mlx-default.toml",
+        r#"# MLX Default — Apple Silicon inference via mlx_lm.server
+# Source: https://github.com/ml-explore/mlx-lm
+# mlx_lm.server exposes an OpenAI-compatible API on localhost.
+# Tool calling support varies by model — Anvil falls back gracefully
+# if the server rejects tool_choice.
+#
+# Usage:
+#   mlx_lm.server --model mlx-community/Qwen2.5-Coder-32B-Instruct-4bit
+#   anvil --backend mlx http://localhost:8080
+
+name = "MLX Default"
+match_patterns = ["mlx-community", "mlx_community"]
+
+[sampling]
+temperature = 0.7
+top_p = 0.9
+
+[context]
+max_window = 131072
+default_window = 16384
+
+[backend]
+preferred = "mlx"
+notes = "Apple Silicon only. Start with: mlx_lm.server --model <name>. Tool calling support varies by model."
+
+[capabilities]
+strengths = ["coding", "creative"]
+"#,
+    ),
 ];
 
 #[cfg(test)]
@@ -619,5 +650,51 @@ mod tests {
     fn nonexistent_directory_returns_empty() {
         let profiles = load_profiles(Path::new("/nonexistent/path/models"));
         assert!(profiles.is_empty());
+    }
+
+    #[test]
+    fn all_bundled_profiles_have_capabilities() {
+        let profiles = load_bundled_profiles();
+        for p in &profiles {
+            assert!(
+                !p.capabilities.strengths.is_empty(),
+                "profile '{}' should have capability strengths",
+                p.name
+            );
+        }
+    }
+
+    #[test]
+    fn capabilities_default_to_empty() {
+        let toml_str = r#"
+            name = "Test"
+            match_patterns = ["test"]
+        "#;
+        let profile: ModelProfile = toml::from_str(toml_str).unwrap();
+        assert!(profile.capabilities.strengths.is_empty());
+    }
+
+    #[test]
+    fn capabilities_parse_from_toml() {
+        let toml_str = r#"
+            name = "Test"
+            match_patterns = ["test"]
+            [capabilities]
+            strengths = ["coding", "creative", "tool-calling"]
+        "#;
+        let profile: ModelProfile = toml::from_str(toml_str).unwrap();
+        assert_eq!(profile.capabilities.strengths.len(), 3);
+        assert!(profile.capabilities.strengths.contains(&"coding".to_string()));
+        assert!(profile.capabilities.strengths.contains(&"creative".to_string()));
+    }
+
+    #[test]
+    fn mlx_profile_exists() {
+        let profiles = load_bundled_profiles();
+        let mlx = profiles.iter().find(|p| p.name == "MLX Default");
+        assert!(mlx.is_some(), "MLX Default profile should exist");
+        let mlx = mlx.unwrap();
+        assert!(mlx.match_patterns.contains(&"mlx-community".to_string()));
+        assert_eq!(mlx.backend.preferred, Some("mlx".to_string()));
     }
 }

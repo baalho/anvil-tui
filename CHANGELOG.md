@@ -5,6 +5,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [v1.7.0] — 2025-07-17 — MLX Hardening Edition
+
+### Added
+- **MLX tool_choice fallback** — when a backend rejects `tool_choice`
+  with 400/422, the client retries once without it. MLX backends that
+  don't support the parameter now work without manual configuration.
+- **MLX Default model profile** — bundled profile matching
+  `mlx-community` / `mlx_community` patterns with appropriate sampling
+  defaults (temp 0.7, top_p 0.9, 128K max context).
+- **Explicit MLX model discovery** — `/models` now uses the correct
+  `/v1/models` endpoint for MLX backends instead of falling through
+  to the generic path.
+- **Project detection edge case tests** — monorepo with multiple
+  markers, `compose.yaml` variant, npm default, yarn lock file.
+- **Mode integration tests** — verify Creative mode omits tools,
+  Coding mode includes tools, persona auto-sets mode.
+- **Capability parsing tests** — verify all bundled profiles have
+  capabilities, defaults to empty, TOML parsing roundtrip.
+
+### Changed
+- **Renderer pipeline completed** — all agent output now routes through
+  the `Renderer` trait: thinking blocks, tool pending/result, command
+  results, compaction messages. `interactive.rs` no longer imports
+  crossterm directly for these operations.
+- `render_tool_result()` signature decoupled from `ToolOutput` — takes
+  icon, line count, and char count instead.
+- Added `render_thinking_start()`, `render_thinking_end()`,
+  `render_tool_pending()` to Renderer trait.
+
 ## [v1.6.0] — 2026-04-02 — Session Awareness Edition
 
 ### Added

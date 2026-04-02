@@ -177,6 +177,11 @@ impl LlmClient {
     /// Retryable conditions: 429 (rate limit), 500/502/503/504 (server errors),
     /// connection reset, timeout. Non-retryable: 400, 401, 403, 404.
     ///
+    /// # tool_choice fallback
+    /// Some backends (notably MLX) don't support `tool_choice`. If the initial
+    /// request fails with 400/422 and the error mentions "tool_choice", the
+    /// client retries once with `tool_choice` removed from the request body.
+    ///
     /// # How streaming works
     /// Returns a channel receiver that emits `StreamEvent`s:
     /// - `ContentDelta` — text chunks as they arrive
@@ -234,7 +239,42 @@ impl LlmClient {
                 Ok(resp)
             }
         })
-        .await?;
+        .await;
+
+        // tool_choice fallback: if the request failed with a 400/422 mentioning
+        // "tool_choice", retry once without it. MLX and some other backends
+        // don't support this parameter.
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                let err_str = e.to_string().to_lowercase();
+                if (err_str.contains("400") || err_str.contains("422"))
+                    && (err_str.contains("tool_choice") || err_str.contains("tool choice"))
+                {
+                    tracing::warn!(
+                        "backend rejected tool_choice — retrying without it (MLX fallback)"
+                    );
+                    let mut fallback_body = request_json.clone();
+                    if let Some(obj) = fallback_body.as_object_mut() {
+                        obj.remove("tool_choice");
+                    }
+                    let resp = self
+                        .http
+                        .post(&url)
+                        .json(&fallback_body)
+                        .send()
+                        .await?;
+                    if !resp.status().is_success() {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        bail!("LLM API error {status}: {body}");
+                    }
+                    resp
+                } else {
+                    return Err(e);
+                }
+            }
+        };
 
         let (tx, rx) = mpsc::channel(64);
 

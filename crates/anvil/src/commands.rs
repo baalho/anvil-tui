@@ -673,8 +673,28 @@ async fn discover_models(agent: &Agent) -> Vec<String> {
                 Err(_) => Vec::new(),
             }
         }
+        anvil_config::BackendKind::Mlx => {
+            // MLX /v1/models — model IDs are often full paths like
+            // "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit".
+            // Extract just the model name for cleaner display.
+            let url = format!("{}/models", agent.base_url().trim_end_matches('/'));
+            match reqwest::get(&url).await {
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
+                    Ok(body) => body["data"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|m| m["id"].as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                },
+                Err(_) => Vec::new(),
+            }
+        }
         _ => {
-            // OpenAI-compatible /v1/models endpoint
+            // OpenAI-compatible /v1/models endpoint (llama-server, vLLM, etc.)
             let url = format!("{}/models", agent.base_url().trim_end_matches('/'));
             match reqwest::get(&url).await {
                 Ok(resp) => match resp.json::<serde_json::Value>().await {

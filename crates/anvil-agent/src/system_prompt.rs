@@ -399,6 +399,49 @@ mod tests {
     }
 
     #[test]
+    fn detects_multiple_markers_monorepo() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[workspace]").unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("Makefile"), "all:").unwrap();
+        std::fs::write(dir.path().join("docker-compose.yml"), "").unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let info = detect_project(dir.path());
+        assert!(info.iter().any(|s| s.contains("Rust")));
+        assert!(info.iter().any(|s| s.contains("Node.js")));
+        assert!(info.iter().any(|s| s.contains("Makefile")));
+        assert!(info.iter().any(|s| s.contains("Docker Compose")));
+        assert!(info.iter().any(|s| s.contains("Git")));
+    }
+
+    #[test]
+    fn detects_compose_yaml_variants() {
+        // compose.yaml (modern format)
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("compose.yaml"), "").unwrap();
+        let info = detect_project(dir.path());
+        assert!(info.iter().any(|s| s.contains("Docker Compose")));
+    }
+
+    #[test]
+    fn detects_npm_as_default_package_manager() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        // No lock file → defaults to npm
+        let info = detect_project(dir.path());
+        assert!(info.iter().any(|s| s.contains("npm")));
+    }
+
+    #[test]
+    fn detects_yarn_from_lock_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("yarn.lock"), "").unwrap();
+        let info = detect_project(dir.path());
+        assert!(info.iter().any(|s| s.contains("yarn")));
+    }
+
+    #[test]
     fn project_info_in_system_prompt() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();

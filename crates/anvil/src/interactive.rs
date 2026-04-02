@@ -248,18 +248,12 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
             match commands::handle_command(trimmed, agent, &cumulative_usage).await {
                 CommandResult::Handled(output) => {
                     if !output.is_empty() {
-                        println!("{output}");
+                        renderer.render_command_result(&output);
                     }
                     continue;
                 }
                 CommandResult::Compact => {
-                    execute!(
-                        io::stdout(),
-                        SetForegroundColor(Color::DarkYellow),
-                        Print("  [compacting context...]\n"),
-                        ResetColor,
-                    )?;
-                    io::stdout().flush()?;
+                    renderer.render_info("  [compacting context...]");
 
                     let cancel = CancellationToken::new();
                     let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(64);
@@ -274,34 +268,19 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         Ok((returned_agent, Ok(result))) => {
                             agent_slot = Some(returned_agent);
                             if result.messages_removed == 0 {
-                                execute!(
-                                    io::stdout(),
-                                    SetForegroundColor(Color::DarkYellow),
-                                    Print("  [nothing to compact]\n"),
-                                    ResetColor,
-                                )?;
+                                renderer.render_info("  [nothing to compact]");
                             } else {
-                                execute!(
-                                    io::stdout(),
-                                    SetForegroundColor(Color::Green),
-                                    Print(format!(
-                                        "  [compacted: {} messages removed, ~{} → ~{} tokens]\n",
-                                        result.messages_removed,
-                                        result.before_tokens,
-                                        result.after_tokens,
-                                    )),
-                                    ResetColor,
-                                )?;
+                                renderer.render_info(&format!(
+                                    "  [compacted: {} messages removed, ~{} → ~{} tokens]",
+                                    result.messages_removed,
+                                    result.before_tokens,
+                                    result.after_tokens,
+                                ));
                             }
                         }
                         Ok((returned_agent, Err(e))) => {
                             agent_slot = Some(returned_agent);
-                            execute!(
-                                io::stdout(),
-                                SetForegroundColor(Color::Red),
-                                Print(format!("  [compaction failed: {e}]\n")),
-                                ResetColor,
-                            )?;
+                            renderer.render_error(&format!("compaction failed: {e}"));
                         }
                         Err(e) => {
                             return Err(anyhow::anyhow!("compaction task panicked: {e}"));
@@ -489,12 +468,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
 
             // Close thinking box when transitioning to non-thinking events
             if in_thinking_block && !matches!(event, AgentEvent::ThinkingDelta(_)) {
-                execute!(
-                    io::stdout(),
-                    SetForegroundColor(Color::DarkGrey),
-                    Print("\n  ╰─\n"),
-                    ResetColor,
-                )?;
+                renderer.render_thinking_end();
                 in_thinking_block = false;
                 needs_newline = false;
             }
@@ -502,24 +476,11 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
             match event {
                 AgentEvent::ThinkingDelta(text) => {
                     if !in_thinking_block {
-                        execute!(
-                            io::stdout(),
-                            SetForegroundColor(Color::DarkGrey),
-                            Print("  ╭─ thinking\n  │ "),
-                            ResetColor,
-                        )?;
+                        renderer.render_thinking_start();
                         in_thinking_block = true;
                         needs_newline = true;
                     }
-                    // Prefix each newline with box-drawing continuation
-                    let prefixed = text.replace('\n', "\n  │ ");
-                    execute!(
-                        io::stdout(),
-                        SetForegroundColor(Color::DarkGrey),
-                        Print(&prefixed),
-                        ResetColor,
-                    )?;
-                    io::stdout().flush()?;
+                    renderer.render_thinking_delta(&text);
                 }
                 AgentEvent::ContentDelta(text) => {
                     if !needs_newline {
@@ -542,14 +503,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                     }
                     let icon = tool_icon(&name);
                     let short_args = truncate_display(&arguments, 80);
-                    execute!(
-                        io::stdout(),
-                        SetForegroundColor(Color::Cyan),
-                        Print(format!("  {icon} {name}")),
-                        SetForegroundColor(Color::DarkGrey),
-                        Print(format!(" ─ {short_args}\n")),
-                        ResetColor,
-                    )?;
+                    renderer.render_tool_pending(&name, icon, &short_args);
 
                     // Track files created for session summary
                     if name == "file_write" {
@@ -574,12 +528,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                     let text = result.text();
                     let lines = text.lines().count();
                     let chars = text.len();
-                    execute!(
-                        io::stdout(),
-                        SetForegroundColor(Color::DarkGrey),
-                        Print(format!("  {icon} {name}: {lines} lines, {chars} chars\n")),
-                        ResetColor,
-                    )?;
+                    renderer.render_tool_result(&name, icon, lines, chars);
                 }
                 AgentEvent::Usage(u) => {
                     cumulative_usage.prompt_tokens += u.prompt_tokens;

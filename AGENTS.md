@@ -12,7 +12,7 @@ Single source of truth for AI agents working in this codebase.
 - **Repo**: https://github.com/baalho/anvil-tui
 - **License**: Apache-2.0
 - **Rust**: edition 2021, MSRV 1.75
-- **Version**: 1.6.0
+- **Version**: 1.7.0
 - **Platforms**: macOS, Linux, Windows/WSL
 - **Default model**: `qwen3-coder:30b` (Ollama)
 
@@ -39,7 +39,7 @@ anvil-config ──┬──► anvil-llm ──┐
 | Crate | Purpose |
 |-------|---------|
 | `anvil-config` | Settings, `.anvil/` harness, model profiles, bundled skills, inventory |
-| `anvil-llm` | HTTP client, SSE streaming, retry, sampling injection, tool_choice |
+| `anvil-llm` | HTTP client, SSE streaming, retry, sampling injection, tool_choice, MLX fallback |
 | `anvil-tools` | 11 tools, executor, permissions, plugins, hooks, truncation, ToolOutput |
 | `anvil-mcp` | MCP client — JSON-RPC over stdio |
 | `anvil-agent` | Agent loop, skills, personas, modes, achievements, sessions, autonomous mode |
@@ -142,6 +142,7 @@ These prevent real bugs. Don't violate them.
 - **Modes over auto-detection**: Explicit `/mode coding|creative` is simpler and more reliable than trying to auto-detect intent from the user's prompt.
 - **Profiles over manual setup**: Kids can't type `/persona sparkle` + `/mode creative` + `/skill cool-stuff`. One `anvil -p sparkle` flag does everything.
 - **Project detection is lightweight**: Only check file existence, don't parse contents. The model needs a hint ("Rust project"), not a full analysis.
+- **tool_choice fallback for MLX**: MLX rejects `tool_choice` with 400/422. Client retries once without it. Don't fail the whole request over a hint parameter.
 
 ---
 
@@ -177,11 +178,11 @@ Before any change:
 | `crates/anvil-agent/src/achievements.rs` | Badge system, session tracker |
 | `crates/anvil-agent/src/persona.rs` | 4 personas (sparkle, bolt, codebeard, homelab) |
 | `crates/anvil-agent/src/system_prompt.rs` | Layered prompt builder with tool-use guidance |
-| `crates/anvil-config/src/profiles.rs` | 9 model profiles with capability tags |
+| `crates/anvil-config/src/profiles.rs` | 10 model profiles with capability tags |
 | `crates/anvil-config/src/bundled_skills.rs` | 21 bundled skills |
 | `crates/anvil-config/src/inventory.rs` | Host/service inventory |
 | `crates/anvil-config/src/settings.rs` | Settings struct, MCP config |
-| `crates/anvil-llm/src/client.rs` | LlmClient, streaming, retry |
+| `crates/anvil-llm/src/client.rs` | LlmClient, streaming, retry, tool_choice fallback |
 | `crates/anvil-tools/src/tools.rs` | 11 tool implementations |
 | `crates/anvil-tools/src/executor.rs` | Tool dispatch, validation |
 | `crates/anvil-tools/src/hooks.rs` | Pre/post hooks, platform-agnostic script discovery |
@@ -190,5 +191,5 @@ Before any change:
 ## Known Issues
 
 1. Ollama defaults to 2048 context — set `OLLAMA_NUM_CTX` or use model profile
-2. MLX tool calling varies by model
+2. MLX tool calling varies by model — `tool_choice` auto-stripped on 400/422
 3. GLM-4.7-Flash has chat template bugs on Ollama — use llama-server with `--jinja`
