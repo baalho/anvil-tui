@@ -203,11 +203,14 @@ impl Agent {
         // Mark session as active
         store.update_session_status(session_id, &SessionStatus::Active)?;
 
+        // Load persisted agent state (mode, persona, skills) if available
+        let snapshot = store.load_snapshot(session_id)?;
+
         let context_limit = settings.agent.context_window;
         let loop_detection_limit = settings.agent.loop_detection_limit as usize;
         let auto_compact_threshold = settings.agent.auto_compact_threshold;
 
-        Ok(Self {
+        let mut agent = Self {
             client,
             executor,
             store,
@@ -225,7 +228,34 @@ impl Agent {
             mcp,
             active_persona: None,
             mode: Mode::default(),
-        })
+        };
+
+        // Restore agent state from snapshot
+        if let Some(snap) = snapshot {
+            // Restore mode
+            match snap.mode.as_str() {
+                "creative" => agent.set_mode(Mode::Creative),
+                _ => agent.set_mode(Mode::Coding),
+            }
+
+            // Restore persona
+            if let Some(ref key) = snap.persona {
+                if let Some(persona) = crate::persona::find_persona(key) {
+                    agent.set_persona(Some(persona));
+                }
+            }
+
+            // Restore skills
+            let loader = crate::skills::SkillLoader::new(agent.workspace());
+            let all_skills = loader.scan();
+            for key in &snap.active_skills {
+                if let Some(skill) = all_skills.iter().find(|s| s.key == *key) {
+                    agent.activate_skill(skill.clone());
+                }
+            }
+        }
+
+        Ok(agent)
     }
 
     pub fn session_id(&self) -> &str {
@@ -493,6 +523,26 @@ impl Agent {
     /// Get the list of extra env vars currently passed through to shell commands.
     pub fn extra_env(&self) -> &[String] {
         self.executor.extra_env()
+    }
+
+    /// Keys of currently active skills (for snapshot persistence).
+    pub fn active_skill_keys(&self) -> Vec<String> {
+        self.active_skills.iter().map(|s| s.key.clone()).collect()
+    }
+
+    /// Persist agent state metadata to SQLite.
+    ///
+    /// Called at the end of every turn so `anvil --continue` restores
+    /// the full agent state. Messages are already saved individually
+    /// during the turn — this captures mode, persona, skills, and profile.
+    pub fn persist_snapshot(&self) -> Result<()> {
+        let snapshot = crate::session::SessionSnapshot {
+            active_skills: self.active_skill_keys(),
+            mode: self.mode.to_string(),
+            persona: self.active_persona.as_ref().map(|p| p.key.clone()),
+            model_profile: None, // set by binary crate when profile is applied
+        };
+        self.store.save_snapshot(&self.session_id, &snapshot)
     }
 
     fn rebuild_system_prompt(&mut self) {
@@ -860,6 +910,10 @@ impl Agent {
             }
 
             if tool_calls.is_empty() {
+                // Persist agent state so resume restores mode/persona/skills
+                if let Err(e) = self.persist_snapshot() {
+                    tracing::warn!("failed to persist session snapshot: {e}");
+                }
                 let _ = event_tx.send(AgentEvent::TurnComplete).await;
                 return Ok(());
             }

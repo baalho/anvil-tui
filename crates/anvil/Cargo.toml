@@ -1,6 +1,6 @@
 [package]
 name = "anvil"
-version = "1.8.0"
+version = "1.9.0"
 description = "CLI binary with TUI for the Anvil coding agent"
 edition.workspace = true
 license.workspace = true
@@ -25,6 +25,7 @@ crossterm = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 ctrlc = "3.5.2"
+notify = { workspace = true }
 reqwest.workspace = true
 tokio-util.workspace = true
 

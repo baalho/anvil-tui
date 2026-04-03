@@ -12,7 +12,7 @@ Single source of truth for AI agents working in this codebase.
 - **Repo**: https://github.com/baalho/anvil-tui
 - **License**: Apache-2.0
 - **Rust**: edition 2021, MSRV 1.75
-- **Version**: 1.8.0
+- **Version**: 1.9.0
 - **Platforms**: macOS, Linux, Windows/WSL
 - **Default model**: `qwen3-coder:30b` (Ollama)
 
@@ -84,6 +84,15 @@ profile remembered across sessions.
 Python, Go, Docker from workspace files. Injected into system prompt so
 the model knows the project type without being told.
 
+**Event** (`event.rs`): Source-agnostic trigger enum (`UserPrompt`,
+`FileChanged`, `Shutdown`). Decouples prompt source from agent logic.
+In v2.0, adding a UDS listener means adding a new event producer —
+zero changes to dispatch or agent code.
+
+**SessionSnapshot** (`session.rs`): Persists agent state (mode, persona,
+skills, profile) to SQLite after every turn. `anvil --continue` restores
+the full agent state, not just messages. Bridge to v2.0 daemon resume.
+
 ### Harness directory
 
 ```
@@ -146,6 +155,9 @@ These prevent real bugs. Don't violate them.
 - **tool_choice fallback for MLX**: MLX rejects `tool_choice` with 400/422. Client retries once without it. Don't fail the whole request over a hint parameter.
 - **BYOB over process management**: Anvil is a CLI agent, not a process supervisor. Use Zellij layouts to manage backend lifecycle. A `backend.rs` process manager was built — Zellij is simpler.
 - **Static context over auto-sizing**: Model profiles declare `recommended_context` statically. No GGUF parsing, no memory math. Trust the profile.
+- **Event enum over trait dispatch**: `Event` is an enum, not `Box<dyn EventSource>`. Compiler verifies exhaustiveness. Adding a v2.0 UDS variant is one match arm, not a trait implementation.
+- **Snapshot metadata, not message re-serialization**: `SessionSnapshot` stores mode/persona/skills/profile — not messages. Messages are already saved individually during the turn. Don't serialize the same data twice.
+- **KV cache is the backend's problem**: On session resume, Anvil sends full message history. The backend decides whether to recompute or reuse cache. Don't try to detect cache state from the client side.
 
 ---
 
@@ -184,6 +196,8 @@ Before any change:
 | `crates/anvil-config/src/profiles.rs` | 12 model profiles with capability tags and KV cache config |
 | `crates/anvil-config/src/bundled_skills.rs` | 22 bundled skills |
 | `crates/anvil-config/src/bundled_layouts.rs` | 3 bundled Zellij layouts (TQ, dev, ops) |
+| `crates/anvil-agent/src/event.rs` | Source-agnostic Event enum (v2.0 bridge) |
+| `crates/anvil-agent/src/dispatch.rs` | Event dispatch — routes events to agent.turn() |
 | `crates/anvil-config/src/inventory.rs` | Host/service inventory with deployment support |
 | `crates/anvil-config/src/settings.rs` | Settings struct, MCP config |
 | `crates/anvil-llm/src/client.rs` | LlmClient, streaming, retry, tool_choice fallback |
@@ -191,6 +205,7 @@ Before any change:
 | `crates/anvil-tools/src/executor.rs` | Tool dispatch, validation |
 | `crates/anvil-tools/src/hooks.rs` | Pre/post hooks, platform-agnostic script discovery |
 | `crates/anvil-mcp/src/manager.rs` | MCP server lifecycle |
+| `crates/anvil/src/watcher.rs` | File watcher (notify crate), debounce, noise filtering |
 
 ## Known Issues
 

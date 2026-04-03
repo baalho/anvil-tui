@@ -5,6 +5,25 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::Uuid;
 
+/// Snapshot of agent state that survives process exit.
+///
+/// Captures everything needed to reconstruct an Agent from cold start:
+/// the full message history plus mode, persona, skills, and model profile.
+/// Persisted to SQLite after every turn so `anvil --continue` restores
+/// the exact agent state. In v2.0, this same snapshot enables the daemon
+/// to resume sessions after restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSnapshot {
+    /// Active skill keys (not full Skill structs — those are resolved at load time).
+    pub active_skills: Vec<String>,
+    /// Operating mode: "coding" or "creative".
+    pub mode: String,
+    /// Active persona key, if any.
+    pub persona: Option<String>,
+    /// Model profile name for re-matching on resume.
+    pub model_profile: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -123,6 +142,25 @@ impl SessionStore {
                 ALTER TABLE sessions ADD COLUMN estimated_cost_usd REAL;
                 ",
             )?;
+        }
+
+        // v1.9: Add agent state columns for session resume.
+        // These capture mode, persona, skills, and model profile so
+        // `anvil --continue` restores the full agent state, not just messages.
+        let has_mode_col: bool = self
+            .conn
+            .prepare("SELECT mode FROM sessions LIMIT 0")
+            .is_ok();
+        if !has_mode_col {
+            self.conn.execute_batch(
+                "
+                ALTER TABLE sessions ADD COLUMN active_skills TEXT DEFAULT '[]';
+                ALTER TABLE sessions ADD COLUMN mode TEXT DEFAULT 'coding';
+                ALTER TABLE sessions ADD COLUMN persona TEXT DEFAULT NULL;
+                ALTER TABLE sessions ADD COLUMN model_profile TEXT DEFAULT NULL;
+                ",
+            )?;
+            tracing::info!("migrated sessions table: added agent state columns (v1.9)");
         }
 
         Ok(())
@@ -296,6 +334,71 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Persist agent state metadata after each turn.
+    ///
+    /// This does NOT re-serialize messages — those are already saved
+    /// individually by `save_message()` during the turn. This only
+    /// captures the agent's configuration state (mode, persona, skills,
+    /// profile) so resume can reconstruct the full agent.
+    pub fn save_snapshot(&self, session_id: &str, snapshot: &SessionSnapshot) -> Result<()> {
+        let skills_json = serde_json::to_string(&snapshot.active_skills)?;
+        let now = Utc::now().to_rfc3339();
+
+        self.conn.execute(
+            "UPDATE sessions SET
+                active_skills = ?1,
+                mode = ?2,
+                persona = ?3,
+                model_profile = ?4,
+                updated_at = ?5
+             WHERE id = ?6",
+            params![
+                skills_json,
+                snapshot.mode,
+                snapshot.persona,
+                snapshot.model_profile,
+                now,
+                session_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load agent state metadata for session resume.
+    ///
+    /// Returns `None` for pre-v1.9 sessions that lack the metadata columns.
+    /// Messages are loaded separately via `load_messages()`.
+    pub fn load_snapshot(&self, session_id: &str) -> Result<Option<SessionSnapshot>> {
+        let result = self.conn.query_row(
+            "SELECT active_skills, mode, persona, model_profile
+             FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| {
+                let skills_json: String = row.get(0)?;
+                let mode: String = row.get(1)?;
+                let persona: Option<String> = row.get(2)?;
+                let model_profile: Option<String> = row.get(3)?;
+                Ok((skills_json, mode, persona, model_profile))
+            },
+        );
+
+        match result {
+            Ok((skills_json, mode, persona, model_profile)) => {
+                let active_skills: Vec<String> =
+                    serde_json::from_str(&skills_json).unwrap_or_default();
+
+                Ok(Some(SessionSnapshot {
+                    active_skills,
+                    mode,
+                    persona,
+                    model_profile,
+                }))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub fn find_latest_resumable(&self) -> Result<Option<Session>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, created_at, updated_at, title, status FROM sessions \
@@ -426,3 +529,107 @@ pub struct StoredMessage {
     pub tool_call_id: Option<String>,
     pub created_at: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_store() -> SessionStore {
+        SessionStore::open(Path::new(":memory:")).expect("in-memory db")
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let store = test_store();
+        // Running migrate again should not fail
+        store.migrate().expect("second migration");
+        store.migrate().expect("third migration");
+    }
+
+    #[test]
+    fn save_and_load_snapshot_roundtrip() {
+        let store = test_store();
+        let session = store.create_session().unwrap();
+
+        let snapshot = SessionSnapshot {
+            active_skills: vec!["deploy".into(), "docker".into()],
+            mode: "creative".into(),
+            persona: Some("sparkle".into()),
+            model_profile: Some("qwen3-coder-tq4".into()),
+        };
+
+        store.save_snapshot(&session.id, &snapshot).unwrap();
+        let loaded = store.load_snapshot(&session.id).unwrap().unwrap();
+
+        assert_eq!(loaded.active_skills, vec!["deploy", "docker"]);
+        assert_eq!(loaded.mode, "creative");
+        assert_eq!(loaded.persona.as_deref(), Some("sparkle"));
+        assert_eq!(loaded.model_profile.as_deref(), Some("qwen3-coder-tq4"));
+    }
+
+    #[test]
+    fn load_snapshot_defaults_for_new_session() {
+        let store = test_store();
+        let session = store.create_session().unwrap();
+
+        // No save_snapshot called — should return defaults from migration
+        let loaded = store.load_snapshot(&session.id).unwrap().unwrap();
+        assert!(loaded.active_skills.is_empty());
+        assert_eq!(loaded.mode, "coding");
+        assert!(loaded.persona.is_none());
+        assert!(loaded.model_profile.is_none());
+    }
+
+    #[test]
+    fn load_snapshot_nonexistent_session() {
+        let store = test_store();
+        let loaded = store.load_snapshot("nonexistent-id").unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn snapshot_overwrites_previous() {
+        let store = test_store();
+        let session = store.create_session().unwrap();
+
+        let snap1 = SessionSnapshot {
+            active_skills: vec!["deploy".into()],
+            mode: "coding".into(),
+            persona: None,
+            model_profile: None,
+        };
+        store.save_snapshot(&session.id, &snap1).unwrap();
+
+        let snap2 = SessionSnapshot {
+            active_skills: vec!["docker".into(), "k8s".into()],
+            mode: "creative".into(),
+            persona: Some("bolt".into()),
+            model_profile: Some("mlx-default".into()),
+        };
+        store.save_snapshot(&session.id, &snap2).unwrap();
+
+        let loaded = store.load_snapshot(&session.id).unwrap().unwrap();
+        assert_eq!(loaded.active_skills, vec!["docker", "k8s"]);
+        assert_eq!(loaded.mode, "creative");
+        assert_eq!(loaded.persona.as_deref(), Some("bolt"));
+        assert_eq!(loaded.model_profile.as_deref(), Some("mlx-default"));
+    }
+
+    #[test]
+    fn snapshot_with_empty_skills() {
+        let store = test_store();
+        let session = store.create_session().unwrap();
+
+        let snapshot = SessionSnapshot {
+            active_skills: vec![],
+            mode: "coding".into(),
+            persona: None,
+            model_profile: None,
+        };
+        store.save_snapshot(&session.id, &snapshot).unwrap();
+
+        let loaded = store.load_snapshot(&session.id).unwrap().unwrap();
+        assert!(loaded.active_skills.is_empty());
+    }
+}
+

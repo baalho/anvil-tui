@@ -5,6 +5,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [v1.9.0] — 2025-07-17 — Bridge to v2.0
+
+### Added
+- **Session snapshots** — `SessionSnapshot` persists agent state (mode,
+  persona, active skills, model profile) to SQLite after every turn.
+  `anvil --continue` now restores the full agent state, not just messages.
+  New columns added via idempotent migration.
+- **Event abstraction** — `Event` enum (`UserPrompt`, `FileChanged`,
+  `Shutdown`) decouples trigger sources from agent logic. `dispatch_event()`
+  routes any event to `agent.turn()` without knowing the source. In v2.0,
+  adding a UDS listener requires zero changes to dispatch or agent code.
+- **`anvil watch` command** — native file watcher using the `notify` crate.
+  Monitors the workspace for file changes, debounces editor save storms
+  (configurable, default 2s), filters noise (`.git/`, `target/`,
+  `node_modules/`, swap files, hidden files), and triggers agent turns
+  automatically. Supports `--ignore` patterns and `--debounce` interval.
+- **22 new tests** — session snapshot roundtrip (6), event enum (3),
+  dispatch prompt formatting (3), file watcher noise filtering (10).
+
+### Fixed
+- `anvil --profile` no longer panics when `Settings` is consumed by
+  `Agent::new()` — now clones settings before passing to agent.
+- Skill activation in launch profiles uses `SkillLoader::scan()` instead
+  of nonexistent `load_all()` method.
+
+### Design Decision
+- **Stateless autonomy over daemon** — v1.9 builds the abstractions
+  (Event enum, dispatch loop, session persistence) that v2.0 needs,
+  without introducing IPC, process supervision, or socket management.
+  Every line of v1.9 code is load-bearing in v2.0.
+
 ## [v1.8.0] — 2025-07-17 — BYOB TurboQuant & Ops Platform
 
 ### Added

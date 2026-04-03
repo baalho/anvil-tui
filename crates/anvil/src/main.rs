@@ -2,6 +2,7 @@ mod backend;
 mod commands;
 mod interactive;
 pub mod render;
+mod watcher;
 
 use anvil_agent::{Agent, AgentEvent, McpManager, McpServerConfig, SessionStore};
 use anvil_config::{data_dir, load_settings, Settings};
@@ -76,6 +77,15 @@ enum Commands {
         #[arg(long, default_value = "30")]
         max_minutes: u64,
     },
+    /// Watch workspace for file changes and react automatically
+    Watch {
+        /// Glob patterns to ignore (substring match)
+        #[arg(short, long)]
+        ignore: Vec<String>,
+        /// Debounce interval in seconds
+        #[arg(long, default_value = "2")]
+        debounce: u64,
+    },
 }
 
 #[tokio::main]
@@ -100,6 +110,10 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Init) => cmd_init(&workspace),
         Some(Commands::History { limit, search }) => cmd_history(limit, search),
+        Some(Commands::Watch {
+            ignore,
+            debounce,
+        }) => cmd_watch(&workspace, debounce, ignore).await,
         Some(Commands::Run {
             prompt,
             auto_approve,
@@ -153,7 +167,7 @@ async fn main() -> Result<()> {
 
             let (mut agent, summary) = match cli.continue_session {
                 Some(prefix) => resume_session(&workspace, &store, prefix.as_deref(), mcp)?,
-                None => (Agent::new(settings, workspace, store, mcp)?, None),
+                None => (Agent::new(settings.clone(), workspace, store, mcp)?, None),
             };
 
             // Apply sampling params from profile to the LLM client
@@ -338,13 +352,11 @@ fn apply_launch_profile(
     // Activate skills
     for skill_key in &profile.skills {
         let loader = anvil_agent::SkillLoader::new(agent.workspace());
-        if let Ok(skills) = loader.load_all() {
-            if let Some(skill) = skills.into_iter().find(|s| s.key.eq_ignore_ascii_case(skill_key))
-            {
-                agent.activate_skill(skill);
-            } else {
-                eprintln!("  ⚠ profile '{}': unknown skill '{}'", profile.name, skill_key);
-            }
+        let skills: Vec<anvil_agent::Skill> = loader.scan();
+        if let Some(skill) = skills.into_iter().find(|s| s.key.eq_ignore_ascii_case(skill_key)) {
+            agent.activate_skill(skill);
+        } else {
+            eprintln!("  ⚠ profile '{}': unknown skill '{}'", profile.name, skill_key);
         }
     }
 
@@ -755,6 +767,167 @@ async fn cmd_run_autonomous(
             }
         }
     }
+
+    Ok(())
+}
+
+/// Watch workspace for file changes and trigger agent turns.
+///
+/// Blocks the terminal until Ctrl+C. The file watcher runs in a background
+/// thread, debounces events, and sends them through the Event abstraction.
+/// In v2.0, this same watcher runs inside the daemon — the code is identical.
+async fn cmd_watch(
+    workspace: &Path,
+    debounce_secs: u64,
+    ignore: Vec<String>,
+) -> Result<()> {
+    use anvil_agent::{dispatch_event, DispatchResult, Event};
+
+    let mut settings = load_settings(workspace)?;
+    auto_detect_model(&mut settings).await;
+
+    let profiles = load_model_profiles(workspace);
+    if let Some(profile) = anvil_config::find_matching_profile(&profiles, &settings.provider.model)
+    {
+        let effective = profile.effective_context();
+        if effective > 0 {
+            settings.agent.context_window = effective;
+        }
+    }
+
+    let db_path = data_dir()?.join("sessions.db");
+    let store = SessionStore::open(&db_path)?;
+    let mcp = build_mcp_manager(&settings).await;
+    let mut agent = Agent::new(settings, workspace.to_path_buf(), store, mcp)?;
+
+    if let Some(profile) = anvil_config::find_matching_profile(&profiles, agent.model()) {
+        agent.apply_model_profile(profile);
+    }
+
+    eprintln!("╭─────────────────────────────────────╮");
+    eprintln!(
+        "│  ⚒  Anvil Watch v{:<19}│",
+        env!("CARGO_PKG_VERSION")
+    );
+    eprintln!("│  watching for file changes...        │");
+    eprintln!("╰─────────────────────────────────────╯");
+    eprintln!("  model:    {}", agent.model());
+    eprintln!("  session:  {}", &agent.session_id()[..8]);
+    eprintln!("  cwd:      {}", workspace.display());
+    eprintln!("  debounce: {}s", debounce_secs);
+    eprintln!("  press Ctrl+C to stop");
+    eprintln!();
+
+    // Event channel — the v2.0 bridge
+    let (event_tx, mut event_rx) = mpsc::channel::<Event>(32);
+
+    // Spawn the file watcher in a blocking thread (notify uses std::sync)
+    let watcher_tx = event_tx.clone();
+    let watch_workspace = workspace.to_path_buf();
+    let watcher_handle = tokio::task::spawn_blocking(move || {
+        let config = watcher::WatchConfig {
+            workspace: watch_workspace,
+            debounce: std::time::Duration::from_secs(debounce_secs),
+            ignore_patterns: ignore,
+        };
+        if let Err(e) = watcher::run_file_watcher(config, watcher_tx) {
+            tracing::error!("file watcher failed: {e}");
+        }
+    });
+
+    // Spawn signal handler
+    let signal_tx = event_tx.clone();
+    tokio::spawn(async move {
+        if let Ok(()) = tokio::signal::ctrl_c().await {
+            eprintln!("\n  shutting down...");
+            let _ = signal_tx.send(Event::Shutdown).await;
+        }
+    });
+
+    // Drop our copy so the loop exits when all producers drop
+    drop(event_tx);
+
+    let renderer = crate::render::TerminalRenderer::new();
+
+    // Dispatch loop — process events until shutdown
+    while let Some(event) = event_rx.recv().await {
+        // Log what triggered this turn
+        let trigger_desc = match &event {
+            Event::FileChanged { paths } => {
+                let names: Vec<&str> = paths
+                    .iter()
+                    .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+                    .take(5)
+                    .collect();
+                format!("{} file(s): {}", paths.len(), names.join(", "))
+            }
+            Event::Shutdown => "shutdown".into(),
+            Event::UserPrompt { .. } => "prompt".into(),
+        };
+        eprintln!("  ⚡ {trigger_desc}");
+
+        // Create channels for this turn
+        let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(64);
+        let (_perm_tx, perm_rx) = mpsc::channel::<PermissionDecision>(1);
+        // Watch mode auto-approves all tool calls — user isn't at the keyboard.
+        // The permission_rx channel is immediately dropped, which the agent
+        // treats as auto-approve for read-only tools and deny for mutating ones.
+
+        let cancel = CancellationToken::new();
+
+        // Drain agent events to terminal in a background task
+        let drain_handle = tokio::spawn(async move {
+            use crate::render::Renderer;
+            let r = crate::render::TerminalRenderer::new();
+            while let Some(ev) = agent_event_rx.recv().await {
+                match ev {
+                    AgentEvent::ContentDelta(text) => r.render_content_delta(&text),
+                    AgentEvent::ThinkingDelta(text) => r.render_thinking_delta(&text),
+                    AgentEvent::ToolCallPending {
+                        name, arguments, ..
+                    } => {
+                        let short = if arguments.len() > 60 {
+                            format!("{}...", &arguments[..60])
+                        } else {
+                            arguments
+                        };
+                        r.render_tool_pending(&name, "⚙", &short);
+                    }
+                    AgentEvent::ToolResult { name, result } => {
+                        let text = result.text();
+                        r.render_tool_result(&name, "✓", text.lines().count(), text.len());
+                    }
+                    AgentEvent::Error(msg) => r.render_error(&msg),
+                    AgentEvent::TurnComplete => {
+                        r.render_info("  [turn complete]");
+                    }
+                    _ => {} // Other events logged at trace level
+                }
+            }
+        });
+
+        let result =
+            dispatch_event(&mut agent, event, &agent_event_tx, perm_rx, cancel).await?;
+
+        // Drop the sender so the drain task finishes
+        drop(agent_event_tx);
+        let _ = drain_handle.await;
+
+        match result {
+            DispatchResult::Shutdown => break,
+            DispatchResult::Handled => {
+                eprintln!();
+            }
+        }
+    }
+
+    watcher_handle.abort();
+    let _ = renderer; // suppress unused warning
+    eprintln!(
+        "  watch session ended. session: {}",
+        &agent.session_id()[..8]
+    );
+    agent.pause_session()?;
 
     Ok(())
 }
