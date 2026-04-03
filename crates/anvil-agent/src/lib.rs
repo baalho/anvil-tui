@@ -8,7 +8,7 @@ pub mod persona;
 pub mod routing;
 mod session;
 pub mod skills;
-mod system_prompt;
+pub mod system_prompt;
 pub mod thinking;
 
 pub use achievements::{AchievementStore, SessionTracker};

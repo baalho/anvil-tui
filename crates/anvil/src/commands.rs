@@ -555,10 +555,17 @@ async fn model_command(agent: &mut Agent, arg: &str) -> String {
             if let Some(p) = profile.sampling.top_p {
                 info.push_str(&format!(", top_p={p}"));
             }
-            if profile.context.default_window > 0 {
-                info.push_str(&format!(", ctx={}", profile.context.default_window));
+            let effective_ctx = profile.effective_context();
+            if effective_ctx > 0 {
+                info.push_str(&format!(", ctx={effective_ctx}"));
             }
             info.push(')');
+            if let Some(ref kv) = profile.kv_cache {
+                info.push_str(&format!(
+                    "\nkv cache: K={} V={} (context: {} tokens)",
+                    kv.type_k, kv.type_v, kv.recommended_context
+                ));
+            }
         } else {
             info.push_str("profile: (none)");
         }

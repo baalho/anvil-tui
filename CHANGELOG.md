@@ -5,6 +5,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [v1.8.0] — 2025-07-17 — BYOB TurboQuant & Ops Platform
+
+### Added
+- **TurboQuant KV cache profiles** — `KvCacheConfig` struct with `type_k`,
+  `type_v`, and `recommended_context` fields. Two bundled profiles for
+  Qwen3-Coder with turbo4 (262K context) and turbo3 (512K context).
+  `recommended_context` overrides `context.default_window` when matched.
+- **Zellij layouts** — three bundled KDL layouts written to
+  `.anvil/layouts/` by `anvil init`:
+  - `anvil-tq.kdl` — TurboQuant (llama-server + Anvil in split panes)
+  - `anvil-dev.kdl` — development (Anvil + editor + shell)
+  - `anvil-ops.kdl` — homelab operations (Anvil + SSH + logs)
+- **`--zellij [layout]` CLI flag** — launches Anvil inside a Zellij
+  session with the named layout. Detects `$ZELLIJ` to prevent nesting.
+  Skips launch inside devcontainers.
+- **Devcontainer detection** — `detect_devcontainer()` checks 4
+  indicators (/.dockerenv, REMOTE_CONTAINERS, CODESPACES, /workspaces/
+  prefix, devcontainer.json). Injects Layer 4d into system prompt.
+- **Deployment skill** — `deploy.md` bundled skill for deploying
+  services to inventory hosts using SOPS/age secrets and SSH.
+- **Structured deployments in inventory** — `[[hosts.deployments]]`
+  with `name`, `port`, `secrets`, and `compose_file` fields. Deployment
+  details rendered in system prompt with runtime-specific commands.
+- **KV cache info in `/model` and startup banner** — shows cache type
+  and effective context when a TQ profile is matched.
+- **`ModelProfile::effective_context()`** — returns `recommended_context`
+  from `[kv_cache]` if present, otherwise `context.default_window`.
+
+### Design Decision
+- **BYOB (Bring Your Own Backend)** — Anvil does not manage inference
+  server processes. Zellij layouts handle backend lifecycle. This follows
+  the "prefer boring over clever" principle from AGENTS.md.
+
 ## [v1.7.0] — 2025-07-17 — MLX Hardening Edition
 
 ### Added

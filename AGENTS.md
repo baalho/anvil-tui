@@ -12,7 +12,7 @@ Single source of truth for AI agents working in this codebase.
 - **Repo**: https://github.com/baalho/anvil-tui
 - **License**: Apache-2.0
 - **Rust**: edition 2021, MSRV 1.75
-- **Version**: 1.7.0
+- **Version**: 1.8.0
 - **Platforms**: macOS, Linux, Windows/WSL
 - **Default model**: `qwen3-coder:30b` (Ollama)
 
@@ -38,7 +38,7 @@ anvil-config ──┬──► anvil-llm ──┐
 
 | Crate | Purpose |
 |-------|---------|
-| `anvil-config` | Settings, `.anvil/` harness, model profiles, bundled skills, inventory |
+| `anvil-config` | Settings, `.anvil/` harness, model profiles, bundled skills/layouts, inventory |
 | `anvil-llm` | HTTP client, SSE streaming, retry, sampling injection, tool_choice, MLX fallback |
 | `anvil-tools` | 11 tools, executor, permissions, plugins, hooks, truncation, ToolOutput |
 | `anvil-mcp` | MCP client — JSON-RPC over stdio |
@@ -93,7 +93,8 @@ the model knows the project type without being told.
 ├── inventory.toml       # Host/service registry (optional)
 ├── achievements.json    # Unlocked badges
 ├── models/              # Per-model sampling profiles (TOML)
-├── skills/              # 21 bundled skills (Markdown + YAML frontmatter)
+├── skills/              # 22 bundled skills (Markdown + YAML frontmatter)
+├── layouts/             # 3 bundled Zellij layouts (KDL)
 └── memory/              # Persistent learned patterns (categorized markdown)
 ```
 
@@ -143,6 +144,8 @@ These prevent real bugs. Don't violate them.
 - **Profiles over manual setup**: Kids can't type `/persona sparkle` + `/mode creative` + `/skill cool-stuff`. One `anvil -p sparkle` flag does everything.
 - **Project detection is lightweight**: Only check file existence, don't parse contents. The model needs a hint ("Rust project"), not a full analysis.
 - **tool_choice fallback for MLX**: MLX rejects `tool_choice` with 400/422. Client retries once without it. Don't fail the whole request over a hint parameter.
+- **BYOB over process management**: Anvil is a CLI agent, not a process supervisor. Use Zellij layouts to manage backend lifecycle. A `backend.rs` process manager was built — Zellij is simpler.
+- **Static context over auto-sizing**: Model profiles declare `recommended_context` statically. No GGUF parsing, no memory math. Trust the profile.
 
 ---
 
@@ -177,10 +180,11 @@ Before any change:
 | `crates/anvil-agent/src/autonomous.rs` | Ralph Loop runner |
 | `crates/anvil-agent/src/achievements.rs` | Badge system, session tracker |
 | `crates/anvil-agent/src/persona.rs` | 4 personas (sparkle, bolt, codebeard, homelab) |
-| `crates/anvil-agent/src/system_prompt.rs` | Layered prompt builder with tool-use guidance |
-| `crates/anvil-config/src/profiles.rs` | 10 model profiles with capability tags |
-| `crates/anvil-config/src/bundled_skills.rs` | 21 bundled skills |
-| `crates/anvil-config/src/inventory.rs` | Host/service inventory |
+| `crates/anvil-agent/src/system_prompt.rs` | Layered prompt builder with tool-use guidance, devcontainer detection |
+| `crates/anvil-config/src/profiles.rs` | 12 model profiles with capability tags and KV cache config |
+| `crates/anvil-config/src/bundled_skills.rs` | 22 bundled skills |
+| `crates/anvil-config/src/bundled_layouts.rs` | 3 bundled Zellij layouts (TQ, dev, ops) |
+| `crates/anvil-config/src/inventory.rs` | Host/service inventory with deployment support |
 | `crates/anvil-config/src/settings.rs` | Settings struct, MCP config |
 | `crates/anvil-llm/src/client.rs` | LlmClient, streaming, retry, tool_choice fallback |
 | `crates/anvil-tools/src/tools.rs` | 11 tool implementations |

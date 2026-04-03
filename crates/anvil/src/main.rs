@@ -34,6 +34,10 @@ struct Cli {
     /// Launch profile name (bundles persona + mode + skills + model)
     #[arg(short = 'p', long = "profile")]
     profile: Option<String>,
+
+    /// Launch inside a Zellij session with a bundled layout
+    #[arg(long = "zellij")]
+    zellij: Option<Option<String>>,
 }
 
 #[derive(Subcommand)]
@@ -88,6 +92,11 @@ async fn main() -> Result<()> {
         .directory
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
+    // Handle --zellij before anything else
+    if let Some(ref zellij_layout) = cli.zellij {
+        return launch_zellij(&workspace, zellij_layout.as_deref());
+    }
+
     match cli.command {
         Some(Commands::Init) => cmd_init(&workspace),
         Some(Commands::History { limit, search }) => cmd_history(limit, search),
@@ -123,11 +132,18 @@ async fn main() -> Result<()> {
             let active_profile =
                 anvil_config::find_matching_profile(&profiles, &settings.provider.model);
             if let Some(profile) = active_profile {
-                // Override context window from profile if it provides one
-                if profile.context.default_window > 0 {
-                    settings.agent.context_window = profile.context.default_window;
+                // Use effective_context() which respects kv_cache.recommended_context
+                let effective = profile.effective_context();
+                if effective > 0 {
+                    settings.agent.context_window = effective;
                 }
                 eprintln!("profile: {} loaded", profile.name);
+                if let Some(ref kv) = profile.kv_cache {
+                    eprintln!(
+                        "  KV cache: K={} V={} | context: {} tokens",
+                        kv.type_k, kv.type_v, kv.recommended_context
+                    );
+                }
             }
 
             let db_path = data_dir()?.join("sessions.db");
@@ -174,16 +190,95 @@ fn cmd_init(workspace: &Path) -> Result<()> {
     println!("    config.toml   — backend & model settings");
     println!("    models/       — per-model sampling profiles");
     println!("    skills/       — 17 prompt templates (including 3 for kids!)");
+    println!("    layouts/      — Zellij terminal layouts (TQ, dev, ops)");
     println!("    memory/       — your learned patterns (starts empty)");
     println!();
     println!("  Next steps:");
     println!("    anvil                          start coding!");
+    println!("    anvil --zellij anvil-tq        TurboQuant layout (llama-server + anvil)");
     println!("    anvil run -p \"hello world\"     quick one-shot");
     println!();
     println!("  Fun mode for kids:");
     println!("    Type /persona sparkle — activates Sparkle + kids mode automatically!");
     println!("    Then just tell Sparkle what you like and watch the magic happen 🦄");
     Ok(())
+}
+
+/// Launch Anvil inside a Zellij session with a bundled layout.
+///
+/// Resolves the layout from `.anvil/layouts/<name>.kdl`. If already inside
+/// Zellij (`$ZELLIJ` env var set), prints a warning and exits — no nested
+/// sessions. Default layout is `anvil-dev` if no name given.
+fn launch_zellij(workspace: &Path, layout_name: Option<&str>) -> Result<()> {
+    // Don't nest Zellij sessions
+    if std::env::var("ZELLIJ").is_ok() {
+        eprintln!("  ⚠ Already inside a Zellij session. Run anvil directly.");
+        return Ok(());
+    }
+
+    // Skip Zellij inside devcontainers (no terminal multiplexer)
+    if anvil_agent::system_prompt::detect_devcontainer(workspace).is_some() {
+        eprintln!("  ⚠ Inside a devcontainer — skipping Zellij launch. Run anvil directly.");
+        return Ok(());
+    }
+
+    let name = layout_name.unwrap_or("anvil-dev");
+    let layout_filename = if name.ends_with(".kdl") {
+        name.to_string()
+    } else {
+        format!("{name}.kdl")
+    };
+
+    // Look for layout in .anvil/layouts/ first, then try as absolute path
+    let layout_path = if let Some(harness) = anvil_config::find_harness_dir(workspace) {
+        let candidate = harness.join("layouts").join(&layout_filename);
+        if candidate.exists() {
+            candidate
+        } else {
+            let abs = PathBuf::from(&layout_filename);
+            if abs.exists() {
+                abs
+            } else {
+                anyhow::bail!(
+                    "layout '{}' not found. Run `anvil init` to create bundled layouts, \
+                     or check .anvil/layouts/",
+                    name
+                );
+            }
+        }
+    } else {
+        anyhow::bail!(
+            "no .anvil/ directory found. Run `anvil init` first."
+        );
+    };
+
+    // Derive session name from layout filename (without .kdl extension)
+    let session_name = layout_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("anvil");
+
+    eprintln!("  launching Zellij layout: {}", layout_path.display());
+    eprintln!("  session: {session_name}");
+
+    // exec into Zellij — replaces this process
+    let status = std::process::Command::new("zellij")
+        .arg("--layout")
+        .arg(&layout_path)
+        .arg("--session")
+        .arg(session_name)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => anyhow::bail!("zellij exited with {}", s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!(
+                "zellij not found. Install it: https://zellij.dev/documentation/installation"
+            );
+        }
+        Err(e) => anyhow::bail!("failed to launch zellij: {e}"),
+    }
 }
 
 /// Apply a named launch profile — sets persona, mode, skills, and model in one shot.

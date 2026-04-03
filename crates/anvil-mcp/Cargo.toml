@@ -1,6 +1,6 @@
 [package]
 name = "anvil-mcp"
-version = "1.7.0"
+version = "1.8.0"
 description = "MCP (Model Context Protocol) client for connecting to external tool servers"
 edition.workspace = true
 license.workspace = true

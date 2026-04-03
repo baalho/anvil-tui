@@ -65,6 +65,10 @@ pub struct ModelProfile {
     /// future auto-selection. Missing section is fine (backward compatible).
     #[serde(default)]
     pub capabilities: Capabilities,
+    /// KV cache quantization settings for TurboQuant backends.
+    /// When present, `recommended_context` overrides `context.default_window`.
+    #[serde(default)]
+    pub kv_cache: Option<KvCacheConfig>,
 }
 
 /// What a model is good at — metadata for display and future auto-routing.
@@ -77,6 +81,28 @@ pub struct Capabilities {
     /// What this model excels at (e.g. ["coding", "tool-calling"]).
     #[serde(default)]
     pub strengths: Vec<String>,
+}
+
+/// KV cache quantization for TurboQuant-enabled backends.
+///
+/// TurboQuant compresses the KV cache using asymmetric quantization —
+/// keys at higher precision (q8_0) for attention accuracy, values at
+/// lower precision (turbo3/turbo4) for memory savings. This enables
+/// 4-6x longer context windows on the same hardware.
+///
+/// Anvil does not manage the backend process. The user launches
+/// llama-server with `--cache-type-k` and `--cache-type-v` flags
+/// (typically via a Zellij layout). This config tells Anvil what
+/// context window to expect and what to display in `/status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KvCacheConfig {
+    /// Key cache quantization type (e.g. "q8_0", "f16").
+    pub type_k: String,
+    /// Value cache quantization type (e.g. "turbo3", "turbo4", "q8_0", "f16").
+    pub type_v: String,
+    /// Recommended context window with this cache configuration.
+    /// Overrides `context.default_window` when the profile is matched.
+    pub recommended_context: usize,
 }
 
 /// Sampling parameters injected into chat completion requests.
@@ -141,6 +167,21 @@ pub struct BackendHints {
     pub flags: Vec<String>,
     /// Human-readable notes about compatibility or quirks.
     pub notes: Option<String>,
+}
+
+impl ModelProfile {
+    /// Returns the effective default context window for this profile.
+    ///
+    /// If a `[kv_cache]` section is present with `recommended_context`,
+    /// that value takes priority over `context.default_window`. This lets
+    /// TurboQuant profiles advertise larger context windows without
+    /// changing the base model's context config.
+    pub fn effective_context(&self) -> usize {
+        self.kv_cache
+            .as_ref()
+            .map(|kv| kv.recommended_context)
+            .unwrap_or(self.context.default_window)
+    }
 }
 
 /// Loads all model profiles from a directory.
@@ -513,6 +554,77 @@ notes = "Apple Silicon only. Start with: mlx_lm.server --model <name>. Tool call
 strengths = ["coding", "creative"]
 "#,
     ),
+    (
+        "qwen3-coder-tq4.toml",
+        r#"# Qwen3-Coder 30B with TurboQuant4 KV cache
+# Requires: TheTom/turboquant_plus llama-server fork
+# Launch: llama-server --cache-type-k q8_0 --cache-type-v turbo4 \
+#           --jinja -ngl 99 -c 262144 -fa on -m <model.gguf>
+#
+# turbo4 is the practical default: +0.6% PPL, near-native decode speed.
+# On M4 Max 64GB: 262K context with 30B Q4 model fits comfortably.
+
+name = "Qwen3-Coder TQ4"
+match_patterns = ["qwen3-coder-tq4", "qwen3-coder-turbo4"]
+
+[sampling]
+temperature = 0.7
+top_p = 0.95
+
+[context]
+max_window = 262144
+default_window = 32768
+
+[backend]
+preferred = "llama-server"
+flags = ["--jinja", "--cache-type-k", "q8_0", "--cache-type-v", "turbo4", "-fa", "on"]
+notes = "Requires turboquant_plus fork of llama.cpp. Use anvil-tq.kdl Zellij layout."
+
+[capabilities]
+strengths = ["coding", "tool-calling", "long-context"]
+
+[kv_cache]
+type_k = "q8_0"
+type_v = "turbo4"
+recommended_context = 262144
+"#,
+    ),
+    (
+        "qwen3-coder-tq3.toml",
+        r#"# Qwen3-Coder 30B with TurboQuant3 KV cache (max compression)
+# Requires: TheTom/turboquant_plus llama-server fork
+# Launch: llama-server --cache-type-k q8_0 --cache-type-v turbo3 \
+#           --jinja -ngl 99 -c 524288 -fa on -m <model.gguf>
+#
+# turbo3 gives 6x KV compression but -37.9% decode speed on pre-M5.
+# On M4 Max 64GB: 512K context is theoretically possible but pushes limits.
+# Use turbo4 unless you specifically need maximum context.
+
+name = "Qwen3-Coder TQ3"
+match_patterns = ["qwen3-coder-tq3", "qwen3-coder-turbo3"]
+
+[sampling]
+temperature = 0.7
+top_p = 0.95
+
+[context]
+max_window = 524288
+default_window = 32768
+
+[backend]
+preferred = "llama-server"
+flags = ["--jinja", "--cache-type-k", "q8_0", "--cache-type-v", "turbo3", "-fa", "on"]
+notes = "Max compression, decode speed tradeoff on pre-M5. Use turbo4 for most workloads."
+
+[capabilities]
+strengths = ["coding", "tool-calling", "long-context"]
+
+[kv_cache]
+type_k = "q8_0"
+type_v = "turbo3"
+recommended_context = 524288
+"#,
+    ),
 ];
 
 #[cfg(test)]
@@ -696,5 +808,70 @@ mod tests {
         let mlx = mlx.unwrap();
         assert!(mlx.match_patterns.contains(&"mlx-community".to_string()));
         assert_eq!(mlx.backend.preferred, Some("mlx".to_string()));
+    }
+
+    #[test]
+    fn tq4_profile_exists_and_parses() {
+        let profiles = load_bundled_profiles();
+        let tq4 = profiles.iter().find(|p| p.name == "Qwen3-Coder TQ4");
+        assert!(tq4.is_some(), "TQ4 profile should exist");
+        let tq4 = tq4.unwrap();
+        let kv = tq4.kv_cache.as_ref().expect("TQ4 should have kv_cache");
+        assert_eq!(kv.type_k, "q8_0");
+        assert_eq!(kv.type_v, "turbo4");
+        assert_eq!(kv.recommended_context, 262144);
+        assert!(tq4.capabilities.strengths.contains(&"long-context".to_string()));
+    }
+
+    #[test]
+    fn tq3_profile_exists_and_parses() {
+        let profiles = load_bundled_profiles();
+        let tq3 = profiles.iter().find(|p| p.name == "Qwen3-Coder TQ3");
+        assert!(tq3.is_some(), "TQ3 profile should exist");
+        let tq3 = tq3.unwrap();
+        let kv = tq3.kv_cache.as_ref().expect("TQ3 should have kv_cache");
+        assert_eq!(kv.type_k, "q8_0");
+        assert_eq!(kv.type_v, "turbo3");
+        assert_eq!(kv.recommended_context, 524288);
+    }
+
+    #[test]
+    fn effective_context_uses_kv_cache_when_present() {
+        let toml_str = r#"
+            name = "Test TQ"
+            match_patterns = ["test-tq"]
+            [context]
+            max_window = 131072
+            default_window = 16384
+            [kv_cache]
+            type_k = "q8_0"
+            type_v = "turbo4"
+            recommended_context = 262144
+        "#;
+        let profile: ModelProfile = toml::from_str(toml_str).unwrap();
+        assert_eq!(profile.effective_context(), 262144);
+    }
+
+    #[test]
+    fn effective_context_falls_back_to_default_window() {
+        let toml_str = r#"
+            name = "Test Normal"
+            match_patterns = ["test-normal"]
+            [context]
+            max_window = 131072
+            default_window = 16384
+        "#;
+        let profile: ModelProfile = toml::from_str(toml_str).unwrap();
+        assert_eq!(profile.effective_context(), 16384);
+    }
+
+    #[test]
+    fn kv_cache_defaults_to_none() {
+        let toml_str = r#"
+            name = "Test"
+            match_patterns = ["test"]
+        "#;
+        let profile: ModelProfile = toml::from_str(toml_str).unwrap();
+        assert!(profile.kv_cache.is_none());
     }
 }

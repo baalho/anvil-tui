@@ -132,6 +132,14 @@ pub fn build_system_prompt(
         }
     }
 
+    // --- Layer 4d: Devcontainer detection (semi-static) ---
+    if let Some(dc) = detect_devcontainer(workspace) {
+        prompt.push_str("\n## Environment: Devcontainer\n");
+        prompt.push_str(&format!("- Workspace: {}\n", dc.workspace));
+        prompt.push_str("- Inference backend runs on host, not in this container.\n");
+        prompt.push_str("- Available tools may differ from host environment.\n");
+    }
+
     // --- Layer 5: Dynamic content (changes every turn) ---
     // Environment info and memory go last so the prefix above stays stable.
     prompt.push_str("\n## Environment\n");
@@ -210,6 +218,63 @@ fn detect_project(workspace: &Path) -> Vec<String> {
     }
 
     info
+}
+
+/// Devcontainer environment info, if detected.
+#[derive(Debug, Clone)]
+pub struct DevcontainerInfo {
+    /// How the devcontainer was detected (for logging).
+    pub indicator: String,
+    /// Workspace path inside the container.
+    pub workspace: String,
+}
+
+/// Detect if Anvil is running inside a devcontainer.
+///
+/// Checks four indicators (any one is sufficient):
+/// 1. `/.dockerenv` file exists (Docker container)
+/// 2. `REMOTE_CONTAINERS` or `CODESPACES` env var set (VS Code)
+/// 3. `/workspaces/` path prefix (devcontainer convention)
+/// 4. `.devcontainer/devcontainer.json` in workspace root
+pub fn detect_devcontainer(workspace: &Path) -> Option<DevcontainerInfo> {
+    let ws_str = workspace.display().to_string();
+
+    if std::path::Path::new("/.dockerenv").exists() {
+        return Some(DevcontainerInfo {
+            indicator: "/.dockerenv".to_string(),
+            workspace: ws_str,
+        });
+    }
+
+    if std::env::var("REMOTE_CONTAINERS").is_ok() {
+        return Some(DevcontainerInfo {
+            indicator: "REMOTE_CONTAINERS env".to_string(),
+            workspace: ws_str,
+        });
+    }
+
+    if std::env::var("CODESPACES").is_ok() {
+        return Some(DevcontainerInfo {
+            indicator: "CODESPACES env".to_string(),
+            workspace: ws_str,
+        });
+    }
+
+    if ws_str.starts_with("/workspaces/") {
+        return Some(DevcontainerInfo {
+            indicator: "/workspaces/ prefix".to_string(),
+            workspace: ws_str,
+        });
+    }
+
+    if workspace.join(".devcontainer/devcontainer.json").exists() {
+        return Some(DevcontainerInfo {
+            indicator: "devcontainer.json".to_string(),
+            workspace: ws_str,
+        });
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -531,5 +596,38 @@ mod tests {
             layer5a < layer5b,
             "Layer 5a (environment) must precede Layer 5b (memory)"
         );
+    }
+
+    #[test]
+    fn devcontainer_detected_by_devcontainer_json() {
+        let dir = TempDir::new().unwrap();
+        let dc_dir = dir.path().join(".devcontainer");
+        std::fs::create_dir_all(&dc_dir).unwrap();
+        std::fs::write(dc_dir.join("devcontainer.json"), "{}").unwrap();
+
+        let result = detect_devcontainer(dir.path());
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().indicator, "devcontainer.json");
+    }
+
+    #[test]
+    fn devcontainer_not_detected_in_plain_directory() {
+        let dir = TempDir::new().unwrap();
+        // TempDir creates in /tmp which doesn't match any indicator
+        // (unless we're actually in a devcontainer, which we handle)
+        let result = detect_devcontainer(dir.path());
+        // In a devcontainer env this might detect /.dockerenv, so we
+        // only assert the devcontainer.json path isn't triggered
+        if result.is_some() {
+            assert_ne!(result.unwrap().indicator, "devcontainer.json");
+        }
+    }
+
+    #[test]
+    fn devcontainer_detected_by_workspaces_prefix() {
+        // Simulate /workspaces/ path
+        let result = detect_devcontainer(Path::new("/workspaces/my-project"));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().indicator, "/workspaces/ prefix");
     }
 }

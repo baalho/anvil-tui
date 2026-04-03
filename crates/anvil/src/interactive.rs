@@ -729,6 +729,16 @@ fn print_banner(agent: &Agent) {
         println!("╰─────────────────────────────────────╯");
         println!("  model:   {}", agent.model());
         println!("  mode:    {}", agent.mode());
+        // Show KV cache info if a TQ profile is matched
+        let profiles = anvil_config::load_bundled_profiles();
+        if let Some(profile) = anvil_config::find_matching_profile(&profiles, agent.model()) {
+            if let Some(ref kv) = profile.kv_cache {
+                println!(
+                    "  kv cache: K={} V={} | ctx: {}",
+                    kv.type_k, kv.type_v, kv.recommended_context
+                );
+            }
+        }
         println!("  session: {}", &agent.session_id()[..8]);
         println!("  cwd:     {}", agent.workspace().display());
         // Show last-used profile hint

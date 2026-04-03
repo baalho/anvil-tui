@@ -19,6 +19,7 @@
 //! └── memory/              # Persistent learned patterns (categorized markdown)
 //! ```
 
+mod bundled_layouts;
 mod bundled_skills;
 pub mod inventory;
 pub mod migration;
@@ -26,11 +27,12 @@ mod profiles;
 mod provider;
 mod settings;
 
+pub use bundled_layouts::BUNDLED_LAYOUTS;
 pub use bundled_skills::BUNDLED_SKILLS;
-pub use inventory::{load_inventory, Inventory};
+pub use inventory::{load_inventory, Deployment, Inventory};
 pub use profiles::{
     find_matching_profile, load_bundled_profiles, load_profiles, profiles_dir, BackendHints,
-    Capabilities, ContextConfig, ModelProfile, SamplingConfig, BUNDLED_PROFILES,
+    Capabilities, ContextConfig, KvCacheConfig, ModelProfile, SamplingConfig, BUNDLED_PROFILES,
 };
 pub use provider::{BackendKind, PricingConfig, ProviderConfig};
 pub use settings::{LaunchProfile, Settings};
@@ -123,7 +125,7 @@ pub fn init_harness(dir: &Path) -> Result<PathBuf> {
     }
 
     // --- subdirectories ---
-    for subdir in ["skills", "memory"] {
+    for subdir in ["skills", "memory", "layouts"] {
         std::fs::create_dir_all(harness.join(subdir))?;
     }
 
@@ -141,6 +143,15 @@ pub fn init_harness(dir: &Path) -> Result<PathBuf> {
     let skills_dir = harness.join("skills");
     for (filename, content) in BUNDLED_SKILLS {
         let path = skills_dir.join(filename);
+        if !path.exists() {
+            std::fs::write(&path, content)?;
+        }
+    }
+
+    // --- bundled Zellij layouts ---
+    let layouts_dir = harness.join("layouts");
+    for (filename, content) in BUNDLED_LAYOUTS {
+        let path = layouts_dir.join(filename);
         if !path.exists() {
             std::fs::write(&path, content)?;
         }

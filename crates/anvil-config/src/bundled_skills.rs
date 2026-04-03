@@ -11,6 +11,7 @@ pub const BUNDLED_SKILLS: &[(&str, &str)] = &[
     ("containers.md", CONTAINERS),
     ("server-admin.md", SERVER_ADMIN),
     ("sops-age.md", SOPS_AGE),
+    ("deploy.md", DEPLOY),
     ("deploy-fish.md", DEPLOY_FISH),
     ("tailscale.md", TAILSCALE),
     ("caddy-cloudflare.md", CADDY_CLOUDFLARE),
@@ -266,6 +267,57 @@ rm .env
 - `.enc.env` → committed to git (encrypted, safe)
 - `.env` → NEVER committed (in `.gitignore`)
 - Deploy: `sops -d .enc.env > .env && compose up && rm .env`
+"#;
+
+const DEPLOY: &str = r#"---
+description: "Deploy services to inventory hosts using SOPS/age secrets"
+category: infrastructure
+tags: [deploy, sops, age, inventory, homelab]
+env:
+  - SOPS_AGE_KEY_FILE
+  - SSH_AUTH_SOCK
+depends:
+  - sops-age
+---
+# Service Deployment
+
+Deploy containerized services to inventory hosts using SOPS/age for secrets
+and SSH for remote execution.
+
+## Prerequisites
+
+- Inventory configured in `.anvil/inventory.toml` with host details
+- SOPS/age encryption set up (see sops-age skill)
+- SSH access to target hosts via Tailscale
+
+## Deployment Workflow
+
+1. **Verify target**: Check inventory for host and service
+2. **Decrypt secrets**: `sops -d secrets/<service>.env > /tmp/<service>.env`
+3. **Copy secrets**: `scp /tmp/<service>.env <user>@<host>:/opt/<service>/.env`
+4. **Deploy**: `ssh <user>@<host> 'cd /opt/<service> && <runtime> compose pull && <runtime> compose up -d'`
+5. **Verify**: `ssh <user>@<host> '<runtime> ps --filter name=<service>'`
+6. **Cleanup**: `rm /tmp/<service>.env`
+
+## Runtime Detection
+
+Use the host's `container_runtime` from inventory:
+- Docker hosts: `docker compose up -d`
+- Podman hosts: `podman-compose up -d` or `podman compose up -d`
+
+## Rollback
+
+If deployment fails:
+```bash
+ssh <user>@<host> 'cd /opt/<service> && <runtime> compose down && <runtime> compose up -d --no-build'
+```
+
+## Security Notes
+
+- NEVER leave decrypted secrets on disk — always clean up temp files
+- Use `sops -d` to decrypt, pipe directly when possible
+- Verify `SSH_AUTH_SOCK` is set for agent forwarding
+- All secrets files should be in `.gitignore`
 "#;
 
 const DEPLOY_FISH: &str = r#"---
