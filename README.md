@@ -1,7 +1,7 @@
 # Anvil
 
 A terminal coding agent forged in Rust. Connects to local models via Ollama,
-llama-server, or MLX. Runs offline. Works airgapped.
+llama-server, or MLX. Runs offline. Works airgapped. Version 2.0.
 
 ## Install (macOS / Apple Silicon)
 
@@ -18,7 +18,8 @@ cargo build --release
 cp target/release/anvil ~/.local/bin/
 ```
 
-See [MANUAL.md](MANUAL.md) for llama-server and MLX setup.
+See [MANUAL.md](MANUAL.md) for TurboQuant (262K context), MLX, and
+daemon setup.
 
 ## Quick Start
 
@@ -40,62 +41,111 @@ anvil run -p "fix the build" -y
 anvil run -p "fix all failing tests" -a --verify "cargo test"
 ```
 
+## Daemon Mode (v2.0)
+
+Run Anvil as a background server. Send prompts from any terminal.
+
+```bash
+# Start the daemon
+anvil daemon start
+
+# Send prompts from anywhere
+anvil send "explain the auth module"
+anvil send -y "fix the failing test"
+
+# Pipe-friendly: stdout is content, stderr is diagnostics
+anvil send "list all TODO comments" > todos.txt
+
+# Check status / stop
+anvil daemon status
+anvil daemon stop
+```
+
+## Watch Mode
+
+Monitor your workspace for file changes and react automatically:
+
+```bash
+anvil watch                          # watch with 2s debounce
+anvil watch --debounce 5             # custom debounce
+anvil watch --ignore vendor/         # ignore patterns
+```
+
+## TurboQuant (262K Context)
+
+Run a 30B model with 262K context on a 64GB MacBook:
+
+```bash
+# Build turboquant_plus (llama.cpp fork with Metal TQ kernels)
+git clone https://github.com/TheTom/turboquant_plus.git
+cd turboquant_plus
+cmake -B build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release -j$(sysctl -n hw.ncpu)
+
+# Launch with TurboQuant
+./build/bin/llama-server \
+  -m ~/models/qwen3-coder-30b-a3b-q4_k_m.gguf \
+  --cache-type-k q8_0 --cache-type-v turbo4 \
+  --jinja -ngl 99 -c 262144 -fa on --port 8080
+
+# Configure Anvil
+# .anvil/config.toml:
+#   [provider]
+#   backend = "llama-server"
+#   base_url = "http://localhost:8080/v1"
+#   model = "qwen3-coder-tq4"
+```
+
+See [MANUAL.md — TurboQuant Setup](MANUAL.md#turboquant-setup) for
+the full walkthrough.
+
 ## Features
 
 ### Multi-Backend Support
-Connect to any OpenAI-compatible API:
 - **Ollama** — easy setup, auto-pulls models
-- **llama-server** — best chat template fidelity (recommended for GLM-4.7-Flash)
-- **MLX** — optimized for Apple Silicon unified memory
+- **llama-server** — TurboQuant, best chat template fidelity
+- **MLX** — Apple Silicon native inference
 
-Switch at runtime: `/backend llama http://localhost:8080/v1`
-
-### Model Profiles
-Per-model sampling parameters in `.anvil/models/*.toml`. Bundled profiles
-for Qwen3-Coder, Qwen3, Devstral, DeepSeek-R1, and GLM-4.7-Flash.
-Auto-applied when the model name matches. All fit on 64GB Apple Silicon.
-
-### Skills System
-21 bundled skills across four categories:
+### 22 Bundled Skills
 
 | Category | Skills |
 |----------|--------|
-| Infrastructure | containers, server-admin, sops-age, deploy-fish, tailscale, caddy-cloudflare, restic-backup, grafana, prometheus |
+| Infrastructure | containers, server-admin, sops-age, deploy-fish, tailscale, caddy-cloudflare, restic-backup, grafana, prometheus, deploy |
 | Dev Tools | nvim, zellij, fish, git-workflow |
 | Meta | verify-all, verify-shell, verify-files, learn-anvil, learn-rust |
 | Kids | kids-first, kids-story, kids-game |
-
-Skills support YAML frontmatter for metadata, env passthrough, and
-verification commands. Write your own in `.anvil/skills/`.
-
-### Autonomous Mode (Ralph Loop)
-Retry until a verification command passes:
-
-```bash
-anvil run -p "fix all tests" -a --verify "cargo test" --max-iterations 5
-```
-
-Guardrails: iteration limit, token budget, wall-clock timeout.
 
 ### 11 Built-in Tools
 `shell`, `file_read`, `file_write`, `file_edit`, `grep`, `ls`, `find`,
 `git_status`, `git_diff`, `git_log`, `git_commit`
 
+### Model Profiles
+Per-model sampling parameters with TurboQuant KV cache config.
+12 bundled profiles including TQ4 (262K) and TQ3 (512K).
+
+### Autonomous Mode (Ralph Loop)
+Retry until a verification command passes:
+```bash
+anvil run -p "fix all tests" -a --verify "cargo test" --max-iterations 5
+```
+
+### Session Persistence
+SQLite-backed sessions with full state snapshots. Resume with
+`anvil -c`. Daemon mode preserves state across restarts.
+
+### Launch Profiles
+Bundle persona + mode + skills + model into one flag:
+```bash
+anvil -p tq          # TurboQuant coding setup
+anvil -p sparkle     # Kids mode
+```
+
 ### MCP (Model Context Protocol)
-Connect external tool servers via MCP over stdio. Configure in
-`.anvil/config.toml` under `[mcp]`. Tools are namespaced as
-`mcp_{server}_{tool}` to avoid conflicts.
+Connect external tool servers via MCP over stdio.
 
 ### Character Personas
 Fun mode for kids: `/persona sparkle` activates Sparkle the Coding Unicorn.
-Also available: Bolt the Robot and Captain Codebeard.
-
-### Achievement System
-10 unlockable badges that celebrate coding milestones. Persona-themed
-unlock notifications. Persisted in `.anvil/achievements.json`.
-
-### Session Persistence
-SQLite-backed sessions with resume: `anvil -c` resumes the last session.
+Also: Bolt the Robot, Captain Codebeard, Homelab Admin.
 
 ## Interactive Commands
 
@@ -104,58 +154,37 @@ SQLite-backed sessions with resume: `anvil -c` resumes the last session.
 /stats                         Token usage, model, backend info
 /model [name]                  Show or switch model
 /backend [type url]            Show or switch backend
-/backend start llama <model>   Start a managed llama-server
-/backend stop                  Stop the managed backend
 /skill [name]                  List, activate, or verify skills
 /ralph <prompt> --verify <cmd> Autonomous mode
 /clear                         Compact conversation context
 /think                         Toggle <think> block visibility
 /route [tool model]            Show or set model routing
-/memory                        List stored patterns
-/memory add <pattern>          Save a new pattern
-/memory search <keyword>       Search memories
+/memory                        List/add/search stored patterns
 /mcp                           List MCP servers and tools
 /persona [name]                Activate a character persona
+/mode [coding|creative]        Switch operating mode
+/selftest                      Run self-diagnostics
+/inventory                     Show host/service inventory
 /history                       List recent sessions
 /end                           End session and exit
 ```
 
-## Configuration
-
-```toml
-# .anvil/config.toml
-[provider]
-backend = "ollama"                     # ollama | llama-server | mlx | custom
-base_url = "http://localhost:11434/v1"
-model = "qwen3-coder:30b"
-
-[agent]
-context_window = 8192                  # overridden by model profile
-loop_detection_limit = 10
-auto_compact_threshold = 80            # auto-compact at 80% context usage
-
-[tools]
-shell_timeout_secs = 30
-
-[mcp]
-servers = []
-```
-
 ## Documentation
 
-- [MANUAL.md](MANUAL.md) — full usage guide, architecture, how-tos
+- [MANUAL.md](MANUAL.md) — full setup guide (TurboQuant, MLX, daemon, watch)
 - [CHANGELOG.md](CHANGELOG.md) — version history
+- [AGENTS.md](AGENTS.md) — AI agent conventions
 
 ## Project Structure
 
 ```
 crates/
-├── anvil-config    # Settings, model profiles, bundled skills, harness management
-├── anvil-llm       # OpenAI-compatible HTTP client, SSE streaming, retry
-├── anvil-tools     # 11 tools, executor, permissions, output truncation
-├── anvil-mcp       # MCP client — JSON-RPC over stdio for external tool servers
-├── anvil-agent     # Agent loop, skills, personas, achievements, sessions
-└── anvil           # CLI binary, interactive mode, slash commands
++-- anvil-config    # Settings, model profiles, bundled skills/layouts
++-- anvil-llm       # OpenAI-compatible HTTP client, SSE streaming, retry
++-- anvil-tools     # 11 tools, executor, permissions, output truncation
++-- anvil-mcp       # MCP client — JSON-RPC over stdio
++-- anvil-agent     # Agent loop, Event enum, dispatch, sessions, skills
++-- anvil           # CLI binary, daemon, watch, IPC client
 ```
 
 ## License

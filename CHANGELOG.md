@@ -5,6 +5,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [v2.0.0] — 2025-07-17 — The Asynchronous Daemon
+
+### Added
+- **Daemon mode** — `anvil daemon start` runs Anvil as a background
+  server. Accepts prompts over Unix domain sockets (IPC). Socket bound
+  at `$XDG_RUNTIME_DIR/anvil/daemon.sock` (Linux) or
+  `/tmp/anvil-$UID/daemon.sock` (macOS). PID file for lifecycle management.
+  Graceful shutdown via `anvil daemon stop` or SIGINT/SIGTERM.
+- **`anvil send`** — lightweight CLI client that connects to the daemon
+  and streams responses. Content goes to stdout (pipe-friendly),
+  diagnostics to stderr. Supports `-y` for auto-approve.
+- **`anvil daemon status`** — shows session, model, mode, uptime, PID.
+- **IPC wire protocol** — length-prefixed JSON over UDS. `Request` enum
+  (Prompt, Status, Shutdown) and `Response` enum (Delta, Thinking,
+  ToolPending, ToolResult, TurnComplete, Error, StatusInfo, Acknowledged).
+  Max frame size 16 MB.
+- **8 new tests** — IPC frame roundtrip, request/response serialization,
+  EOF handling, socket path resolution.
+- **Comprehensive MANUAL.md rewrite** — full onboarding guides for
+  TurboQuant (262K context), MLX, daemon mode, and watch mode. Step-by-step
+  setup for MacBook Pro M4 Max with llama-server + turbo4.
+
+### Design Decision
+- **Single binary architecture** — `anvil` is both daemon and client.
+  No separate binaries, no process manager. `daemon start` runs in
+  foreground; use nohup/systemd/launchd to background.
+- **Sequential dispatch** — the daemon processes one prompt at a time.
+  Additional requests queue in the mpsc channel. The agent is exclusively
+  owned by the dispatch loop — no Arc/Mutex.
+- **Zero changes to anvil-agent** — the v1.9 Event abstraction held.
+  The daemon is a new event producer, not a new event consumer.
+
 ## [v1.9.0] — 2025-07-17 — Bridge to v2.0
 
 ### Added

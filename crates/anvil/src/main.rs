@@ -1,6 +1,9 @@
 mod backend;
+mod client;
 mod commands;
+mod daemon;
 mod interactive;
+mod ipc;
 pub mod render;
 mod watcher;
 
@@ -86,6 +89,29 @@ enum Commands {
         #[arg(long, default_value = "2")]
         debounce: u64,
     },
+    /// Manage the background daemon
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+    /// Send a prompt to the running daemon
+    Send {
+        /// The prompt text
+        prompt: String,
+        /// Auto-approve all tool calls
+        #[arg(short = 'y', long = "yes")]
+        auto_approve: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Start the daemon (runs in foreground — use nohup/systemd to background)
+    Start,
+    /// Stop the running daemon
+    Stop,
+    /// Show daemon status
+    Status,
 }
 
 #[tokio::main]
@@ -114,6 +140,21 @@ async fn main() -> Result<()> {
             ignore,
             debounce,
         }) => cmd_watch(&workspace, debounce, ignore).await,
+        Some(Commands::Daemon { action }) => match action {
+            DaemonAction::Start => cmd_daemon_start(&workspace).await,
+            DaemonAction::Stop => client::daemon_stop().await,
+            DaemonAction::Status => client::daemon_status().await,
+        },
+        Some(Commands::Send {
+            prompt,
+            auto_approve,
+        }) => {
+            let code = client::send_prompt(&prompt, auto_approve).await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
         Some(Commands::Run {
             prompt,
             auto_approve,
@@ -930,6 +971,41 @@ async fn cmd_watch(
     agent.pause_session()?;
 
     Ok(())
+}
+
+/// Start the daemon server.
+///
+/// Runs in the foreground. To background it, use standard Unix tools:
+/// - `nohup anvil daemon start &`
+/// - systemd service
+/// - launchd plist
+/// - tmux/screen/zellij
+///
+/// This follows the "boring over clever" principle — we don't reinvent
+/// process supervision when the OS already provides it.
+async fn cmd_daemon_start(workspace: &Path) -> Result<()> {
+    let mut settings = load_settings(workspace)?;
+    auto_detect_model(&mut settings).await;
+
+    let profiles = load_model_profiles(workspace);
+    if let Some(profile) = anvil_config::find_matching_profile(&profiles, &settings.provider.model)
+    {
+        let effective = profile.effective_context();
+        if effective > 0 {
+            settings.agent.context_window = effective;
+        }
+    }
+
+    let db_path = data_dir()?.join("sessions.db");
+    let store = SessionStore::open(&db_path)?;
+    let mcp = build_mcp_manager(&settings).await;
+    let mut agent = Agent::new(settings, workspace.to_path_buf(), store, mcp)?;
+
+    if let Some(profile) = anvil_config::find_matching_profile(&profiles, agent.model()) {
+        agent.apply_model_profile(profile);
+    }
+
+    daemon::run_daemon(agent).await
 }
 
 /// Print a summary of the autonomous run result.

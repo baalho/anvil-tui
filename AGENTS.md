@@ -12,7 +12,7 @@ Single source of truth for AI agents working in this codebase.
 - **Repo**: https://github.com/baalho/anvil-tui
 - **License**: Apache-2.0
 - **Rust**: edition 2021, MSRV 1.75
-- **Version**: 1.9.0
+- **Version**: 2.0.0
 - **Platforms**: macOS, Linux, Windows/WSL
 - **Default model**: `qwen3-coder:30b` (Ollama)
 
@@ -206,6 +206,9 @@ Before any change:
 | `crates/anvil-tools/src/hooks.rs` | Pre/post hooks, platform-agnostic script discovery |
 | `crates/anvil-mcp/src/manager.rs` | MCP server lifecycle |
 | `crates/anvil/src/watcher.rs` | File watcher (notify crate), debounce, noise filtering |
+| `crates/anvil/src/ipc.rs` | IPC wire protocol: length-prefixed JSON, Request/Response enums |
+| `crates/anvil/src/daemon.rs` | Daemon server: UDS listener, DaemonTask queue, dispatch loop |
+| `crates/anvil/src/client.rs` | IPC client: send prompt, daemon status/stop |
 
 ## Known Issues
 
