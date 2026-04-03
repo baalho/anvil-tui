@@ -1,6 +1,6 @@
 [package]
 name = "anvil-llm"
-version = "2.0.0"
+version = "2.1.0"
 description = "OpenAI-compatible API client with streaming SSE and token counting"
 edition.workspace = true
 license.workspace = true

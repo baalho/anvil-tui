@@ -14,7 +14,8 @@
 
 use anyhow::{bail, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::path::PathBuf;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Maximum frame payload size (16 MB). Prevents OOM from malformed lengths.
@@ -110,36 +111,54 @@ where
     Ok(Some(value))
 }
 
-/// Resolve the daemon socket path.
+/// Hash a workspace path to a short hex string for socket naming.
 ///
-/// Prefers `$XDG_RUNTIME_DIR/anvil/daemon.sock` (standard on Linux).
-/// Falls back to `/tmp/anvil-$UID/daemon.sock` (macOS, minimal systems).
-pub fn socket_path() -> PathBuf {
+/// Uses `DefaultHasher` (SipHash) — not cryptographic, but stable within
+/// a process and sufficient for disambiguating workspace paths.
+fn workspace_hash(workspace: &Path) -> String {
+    let canonical = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canonical.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Resolve the runtime directory for daemon files.
+///
+/// Prefers `$XDG_RUNTIME_DIR/anvil/` (standard on Linux).
+/// Falls back to `/tmp/anvil-$UID/` (macOS, minimal systems).
+fn runtime_dir() -> PathBuf {
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime_dir)
-            .join("anvil")
-            .join("daemon.sock")
+        PathBuf::from(runtime_dir).join("anvil")
     } else {
         #[cfg(unix)]
         let uid = unsafe { libc::getuid() };
         #[cfg(not(unix))]
         let uid = 0u32;
-        PathBuf::from(format!("/tmp/anvil-{uid}")).join("daemon.sock")
+        PathBuf::from(format!("/tmp/anvil-{uid}"))
     }
 }
 
-/// Resolve the daemon PID file path (same directory as the socket).
-pub fn pid_path() -> PathBuf {
-    socket_path().with_file_name("daemon.pid")
+/// Resolve the daemon socket path for a specific workspace.
+///
+/// Each workspace gets its own socket so multiple daemons can run
+/// concurrently in different project directories:
+/// `$RUNTIME_DIR/anvil/daemon-<hash>.sock`
+pub fn socket_path(workspace: &Path) -> PathBuf {
+    let hash = workspace_hash(workspace);
+    runtime_dir().join(format!("daemon-{hash}.sock"))
+}
+
+/// Resolve the daemon PID file path for a specific workspace.
+pub fn pid_path(workspace: &Path) -> PathBuf {
+    let hash = workspace_hash(workspace);
+    runtime_dir().join(format!("daemon-{hash}.pid"))
 }
 
 /// Create the socket directory with owner-only permissions (0700).
-pub fn ensure_socket_dir() -> Result<PathBuf> {
-    let sock = socket_path();
-    let dir = sock
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("invalid socket path"))?
-        .to_path_buf();
+pub fn ensure_socket_dir(workspace: &Path) -> Result<PathBuf> {
+    let dir = runtime_dir();
 
     if !dir.exists() {
         std::fs::create_dir_all(&dir)?;
@@ -149,6 +168,7 @@ pub fn ensure_socket_dir() -> Result<PathBuf> {
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
         }
     }
+    let _ = workspace; // used only for dir resolution in future
     Ok(dir)
 }
 
@@ -242,18 +262,35 @@ mod tests {
     }
 
     #[test]
-    fn socket_path_is_absolute() {
-        let path = socket_path();
+    fn socket_path_is_absolute_and_workspace_scoped() {
+        let ws = Path::new("/home/user/project-a");
+        let path = socket_path(ws);
         assert!(path.is_absolute());
         assert!(path.to_string_lossy().contains("anvil"));
-        assert!(path.to_string_lossy().ends_with("daemon.sock"));
+        assert!(path.to_string_lossy().contains("daemon-"));
+        assert!(path.to_string_lossy().ends_with(".sock"));
+    }
+
+    #[test]
+    fn different_workspaces_get_different_sockets() {
+        let a = socket_path(Path::new("/home/user/project-a"));
+        let b = socket_path(Path::new("/home/user/project-b"));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn same_workspace_gets_same_socket() {
+        let a = socket_path(Path::new("/home/user/project"));
+        let b = socket_path(Path::new("/home/user/project"));
+        assert_eq!(a, b);
     }
 
     #[test]
     fn pid_path_same_directory_as_socket() {
-        let sock = socket_path();
-        let pid = pid_path();
+        let ws = Path::new("/home/user/project");
+        let sock = socket_path(ws);
+        let pid = pid_path(ws);
         assert_eq!(sock.parent(), pid.parent());
-        assert!(pid.to_string_lossy().ends_with("daemon.pid"));
+        assert!(pid.to_string_lossy().ends_with(".pid"));
     }
 }

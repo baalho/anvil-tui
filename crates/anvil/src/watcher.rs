@@ -16,6 +16,7 @@
 
 use anyhow::{bail, Result};
 use anvil_agent::Event;
+use anvil_tools::WriteLedger;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -47,6 +48,10 @@ pub struct WatchConfig {
     pub workspace: PathBuf,
     pub debounce: Duration,
     pub ignore_patterns: Vec<String>,
+    /// Write ledger for suppressing the agent's own file modifications.
+    /// When set, filesystem events whose mtime matches a ledger entry
+    /// are silently dropped to prevent feedback loops.
+    pub write_ledger: Option<WriteLedger>,
 }
 
 /// Start watching the workspace and feed events into the dispatch channel.
@@ -83,6 +88,16 @@ pub fn run_file_watcher(
                     .paths
                     .into_iter()
                     .filter(|p| is_relevant(p, &config.ignore_patterns))
+                    .filter(|p| {
+                        // Check the write ledger — suppress the agent's own writes
+                        if let Some(ref ledger) = config.write_ledger {
+                            if ledger.check_and_consume(p) {
+                                tracing::debug!("suppressed agent write: {}", p.display());
+                                return false;
+                            }
+                        }
+                        true
+                    })
                     .collect();
 
                 if !relevant.is_empty() {

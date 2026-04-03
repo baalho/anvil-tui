@@ -5,6 +5,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [v2.1.0] — 2025-07-17 — The Stability Update
+
+### Fixed
+- **Workspace bleed** — daemon socket path is now workspace-scoped via
+  path hash (`daemon-<hash>.sock`). Multiple daemons can run concurrently
+  in different project directories without collision.
+- **IPC backpressure freezes** — `write_frame` in the connection handler
+  is wrapped in a 3-second timeout. Slow or suspended clients are shed
+  immediately, freeing the dispatch loop.
+- **State tearing on crash** — new `turn_messages` table stores each
+  `ChatMessage` as JSON incrementally during the turn (migration 003).
+  `record_last_message()` is called after every `messages.push()`.
+  Session resume prefers `turn_messages` over decomposed reconstruction.
+- **Watcher ping-pong loop** — `WriteLedger` in `anvil-tools` tracks
+  files modified by `file_write`/`file_edit` with their mtime. The file
+  watcher checks incoming events against the ledger and suppresses the
+  agent's own writes. External modifications (different mtime) pass through.
+
+### Added
+- `WriteLedger` type (`anvil-tools/src/ledger.rs`) — `Arc<RwLock<HashMap>>`
+  shared between tool executor and file watcher.
+- `Agent::set_write_ledger()` — injects the ledger from the binary crate.
+- `SessionStore::append_turn_message()` / `load_turn_messages()` /
+  `clear_turn_messages()` — incremental message persistence.
+- 13 new tests (5 ledger, 5 turn_messages, 3 workspace-scoped sockets).
+
 ## [v2.0.0] — 2025-07-17 — The Asynchronous Daemon
 
 ### Added

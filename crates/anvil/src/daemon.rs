@@ -21,6 +21,11 @@ use anvil_agent::{dispatch_event, Agent, AgentEvent, Event};
 use anvil_tools::PermissionDecision;
 use anyhow::{bail, Result};
 use std::time::{Duration, Instant};
+
+/// Maximum time to wait for a single IPC frame write before dropping
+/// the connection. Prevents a slow/suspended client from blocking the
+/// dispatch loop via channel backpressure.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -46,12 +51,14 @@ enum DaemonTask {
 ///
 /// Binds a UDS listener, writes a PID file, and enters the dispatch loop.
 /// On exit (signal or IPC shutdown), cleans up the socket and PID file.
+/// The socket is workspace-scoped so multiple daemons can run concurrently.
 pub async fn run_daemon(mut agent: Agent) -> Result<()> {
-    let sock_path = ipc::socket_path();
-    let pid_path = ipc::pid_path();
+    let workspace = agent.workspace().to_path_buf();
+    let sock_path = ipc::socket_path(&workspace);
+    let pid_path = ipc::pid_path(&workspace);
 
     // Ensure socket directory exists with correct permissions
-    ipc::ensure_socket_dir()?;
+    ipc::ensure_socket_dir(&workspace)?;
 
     // Remove stale socket from a previous unclean shutdown
     if sock_path.exists() {
@@ -291,9 +298,24 @@ async fn handle_connection(
                     | AgentEvent::ToolOutputDelta { .. } => continue,
                 };
 
-                if ipc::write_frame(&mut writer, &response).await.is_err() {
-                    // Client disconnected mid-stream — stop sending
-                    break;
+                match tokio::time::timeout(
+                    WRITE_TIMEOUT,
+                    ipc::write_frame(&mut writer, &response),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {} // Frame sent successfully
+                    Ok(Err(_)) => {
+                        // Client disconnected mid-stream
+                        tracing::debug!("client disconnected, dropping connection");
+                        break;
+                    }
+                    Err(_) => {
+                        // Write timed out — client is slow or suspended.
+                        // Drop the connection to free the dispatch loop.
+                        tracing::warn!("write timeout ({}s), shedding connection", WRITE_TIMEOUT.as_secs());
+                        break;
+                    }
                 }
             }
         }

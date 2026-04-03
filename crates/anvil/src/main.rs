@@ -142,14 +142,14 @@ async fn main() -> Result<()> {
         }) => cmd_watch(&workspace, debounce, ignore).await,
         Some(Commands::Daemon { action }) => match action {
             DaemonAction::Start => cmd_daemon_start(&workspace).await,
-            DaemonAction::Stop => client::daemon_stop().await,
-            DaemonAction::Status => client::daemon_status().await,
+            DaemonAction::Stop => client::daemon_stop(&workspace).await,
+            DaemonAction::Status => client::daemon_status(&workspace).await,
         },
         Some(Commands::Send {
             prompt,
             auto_approve,
         }) => {
-            let code = client::send_prompt(&prompt, auto_approve).await?;
+            let code = client::send_prompt(&workspace, &prompt, auto_approve).await?;
             if code != 0 {
                 std::process::exit(code);
             }
@@ -845,6 +845,11 @@ async fn cmd_watch(
         agent.apply_model_profile(profile);
     }
 
+    // Create write ledger — shared between tool executor and file watcher
+    // to prevent the agent's own file writes from triggering new turns.
+    let ledger = anvil_tools::WriteLedger::new();
+    agent.set_write_ledger(ledger.clone());
+
     eprintln!("╭─────────────────────────────────────╮");
     eprintln!(
         "│  ⚒  Anvil Watch v{:<19}│",
@@ -865,11 +870,13 @@ async fn cmd_watch(
     // Spawn the file watcher in a blocking thread (notify uses std::sync)
     let watcher_tx = event_tx.clone();
     let watch_workspace = workspace.to_path_buf();
+    let watcher_ledger = ledger.clone();
     let watcher_handle = tokio::task::spawn_blocking(move || {
         let config = watcher::WatchConfig {
             workspace: watch_workspace,
             debounce: std::time::Duration::from_secs(debounce_secs),
             ignore_patterns: ignore,
+            write_ledger: Some(watcher_ledger),
         };
         if let Err(e) = watcher::run_file_watcher(config, watcher_tx) {
             tracing::error!("file watcher failed: {e}");

@@ -12,7 +12,7 @@ Single source of truth for AI agents working in this codebase.
 - **Repo**: https://github.com/baalho/anvil-tui
 - **License**: Apache-2.0
 - **Rust**: edition 2021, MSRV 1.75
-- **Version**: 2.0.0
+- **Version**: 2.1.0
 - **Platforms**: macOS, Linux, Windows/WSL
 - **Default model**: `qwen3-coder:30b` (Ollama)
 
@@ -158,6 +158,9 @@ These prevent real bugs. Don't violate them.
 - **Event enum over trait dispatch**: `Event` is an enum, not `Box<dyn EventSource>`. Compiler verifies exhaustiveness. Adding a v2.0 UDS variant is one match arm, not a trait implementation.
 - **Snapshot metadata, not message re-serialization**: `SessionSnapshot` stores mode/persona/skills/profile — not messages. Messages are already saved individually during the turn. Don't serialize the same data twice.
 - **KV cache is the backend's problem**: On session resume, Anvil sends full message history. The backend decides whether to recompute or reuse cache. Don't try to detect cache state from the client side.
+- **Workspace-scoped sockets**: Hash the workspace path into the socket filename. Multiple daemons can run concurrently in different projects without collision.
+- **Mtime ledger over inotify cookies**: Track agent writes by recording `(path, mtime)` after `file_write`/`file_edit`. The watcher checks mtime match — if it matches, it's our write. Simpler than trying to correlate inotify event IDs.
+- **Timeout over backpressure**: Wrap IPC writes in a 3-second timeout. A slow client should be shed, not allowed to block the agent dispatch loop.
 
 ---
 
@@ -209,6 +212,7 @@ Before any change:
 | `crates/anvil/src/ipc.rs` | IPC wire protocol: length-prefixed JSON, Request/Response enums |
 | `crates/anvil/src/daemon.rs` | Daemon server: UDS listener, DaemonTask queue, dispatch loop |
 | `crates/anvil/src/client.rs` | IPC client: send prompt, daemon status/stop |
+| `crates/anvil-tools/src/ledger.rs` | WriteLedger: mtime tracking to prevent watcher feedback loops |
 
 ## Known Issues
 

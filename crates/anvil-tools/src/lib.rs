@@ -18,6 +18,7 @@
 mod definitions;
 mod executor;
 pub mod hooks;
+mod ledger;
 mod permission;
 pub mod plugins;
 mod tools;
@@ -25,6 +26,7 @@ mod truncation;
 
 pub use definitions::all_tool_definitions;
 pub use executor::{KidsSandbox, ToolExecutor, DEFAULT_KIDS_COMMANDS};
+pub use ledger::WriteLedger;
 pub use hooks::HookRunner;
 pub use permission::{PermissionDecision, PermissionHandler};
 pub use plugins::{load_plugins, ToolPlugin};

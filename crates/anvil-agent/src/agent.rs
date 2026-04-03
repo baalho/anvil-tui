@@ -172,31 +172,43 @@ impl Agent {
         );
         let mut messages = vec![ChatMessage::system(system_prompt)];
 
-        // Reconstruct ChatMessages from stored messages, skipping old system messages
-        for msg in &stored_messages {
-            match msg.role.as_str() {
-                "system" => {} // skip — we regenerated it
-                "user" => {
-                    if let Some(content) = &msg.content {
-                        messages.push(ChatMessage::user(content));
-                    }
+        // Try loading exact ChatMessage JSON from turn_messages (v2.1+).
+        // Falls back to decomposed StoredMessage reconstruction for pre-v2.1 sessions.
+        let turn_msgs = store.load_turn_messages(session_id).unwrap_or_default();
+        if !turn_msgs.is_empty() {
+            // Skip system messages from the stored turn — we regenerated ours
+            for msg in turn_msgs {
+                if msg.role != anvil_llm::Role::System {
+                    messages.push(msg);
                 }
-                "assistant" => {
-                    let content = msg.content.as_deref().unwrap_or("");
-                    let mut chat_msg = ChatMessage::assistant(content);
-                    if let Some(tc_json) = &msg.tool_calls_json {
-                        if let Ok(tool_calls) = serde_json::from_str(tc_json) {
-                            chat_msg.tool_calls = Some(tool_calls);
+            }
+        } else {
+            // Fallback: reconstruct from decomposed stored messages
+            for msg in &stored_messages {
+                match msg.role.as_str() {
+                    "system" => {} // skip — we regenerated it
+                    "user" => {
+                        if let Some(content) = &msg.content {
+                            messages.push(ChatMessage::user(content));
                         }
                     }
-                    messages.push(chat_msg);
-                }
-                "tool" => {
-                    if let (Some(content), Some(tc_id)) = (&msg.content, &msg.tool_call_id) {
-                        messages.push(ChatMessage::tool_result(tc_id, content));
+                    "assistant" => {
+                        let content = msg.content.as_deref().unwrap_or("");
+                        let mut chat_msg = ChatMessage::assistant(content);
+                        if let Some(tc_json) = &msg.tool_calls_json {
+                            if let Ok(tool_calls) = serde_json::from_str(tc_json) {
+                                chat_msg.tool_calls = Some(tool_calls);
+                            }
+                        }
+                        messages.push(chat_msg);
                     }
+                    "tool" => {
+                        if let (Some(content), Some(tc_id)) = (&msg.content, &msg.tool_call_id) {
+                            messages.push(ChatMessage::tool_result(tc_id, content));
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
 
@@ -525,9 +537,29 @@ impl Agent {
         self.executor.extra_env()
     }
 
+    /// Set the write ledger on the tool executor.
+    /// Called by the binary crate in daemon/watch mode to prevent
+    /// the file watcher from triggering on the agent's own writes.
+    pub fn set_write_ledger(&mut self, ledger: anvil_tools::WriteLedger) {
+        self.executor.set_write_ledger(ledger);
+    }
+
     /// Keys of currently active skills (for snapshot persistence).
     pub fn active_skill_keys(&self) -> Vec<String> {
         self.active_skills.iter().map(|s| s.key.clone()).collect()
+    }
+
+    /// Append the last message in the history to the turn log.
+    ///
+    /// Called after every `self.messages.push()` so crash recovery
+    /// can reconstruct the exact conversation state.
+    fn record_last_message(&self) {
+        let seq = self.messages.len().saturating_sub(1);
+        if let Some(msg) = self.messages.last() {
+            if let Err(e) = self.store.append_turn_message(&self.session_id, seq, msg) {
+                tracing::warn!("failed to append turn message: {e}");
+            }
+        }
     }
 
     /// Persist agent state metadata to SQLite.
@@ -724,6 +756,7 @@ impl Agent {
     ) -> Result<()> {
         let user_msg = ChatMessage::user(user_input);
         self.messages.push(user_msg);
+        self.record_last_message();
         self.store
             .save_message(&self.session_id, "user", Some(user_input), None, None)?;
 
@@ -902,6 +935,7 @@ impl Agent {
                 assistant_msg.tool_calls = Some(tool_calls.clone());
             }
             self.messages.push(assistant_msg);
+            self.record_last_message();
 
             // If cancelled, save partial state and exit
             if was_cancelled {
@@ -975,6 +1009,7 @@ impl Agent {
 
                     let tool_result_msg = ChatMessage::tool_result(&tc.id, &result_text);
                     self.messages.push(tool_result_msg);
+                    self.record_last_message();
                     self.store.save_message(
                         &self.session_id,
                         "tool",
@@ -1101,6 +1136,7 @@ impl Agent {
                 let result_text = result.into_text();
                 let tool_result_msg = ChatMessage::tool_result(&tc.id, &result_text);
                 self.messages.push(tool_result_msg);
+                self.record_last_message();
                 self.store.save_message(
                     &self.session_id,
                     "tool",

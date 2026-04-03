@@ -13,6 +13,7 @@ use crate::tools;
 use crate::truncation::{self, TruncationConfig};
 use anyhow::{bail, Result};
 use serde_json::Value;
+use std::path::Path;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -50,6 +51,9 @@ pub struct ToolExecutor {
     file_cache: Arc<Mutex<HashMap<PathBuf, String>>>,
     /// Kids sandbox — when active, restricts workspace and shell commands.
     kids_sandbox: Arc<Mutex<Option<KidsSandbox>>>,
+    /// Write ledger — tracks files modified by the agent to prevent
+    /// watcher feedback loops. Optional: only set in daemon/watch mode.
+    write_ledger: Option<crate::ledger::WriteLedger>,
 }
 
 impl ToolExecutor {
@@ -66,7 +70,14 @@ impl ToolExecutor {
             extra_env: Vec::new(),
             file_cache: Arc::new(Mutex::new(HashMap::new())),
             kids_sandbox: Arc::new(Mutex::new(None)),
+            write_ledger: None,
         }
+    }
+
+    /// Set the write ledger for tracking agent file modifications.
+    /// Called by the binary crate when running in daemon or watch mode.
+    pub fn set_write_ledger(&mut self, ledger: crate::ledger::WriteLedger) {
+        self.write_ledger = Some(ledger);
     }
 
     /// Get the permission handler for checking/granting tool permissions.
@@ -148,11 +159,13 @@ impl ToolExecutor {
             "file_write" => {
                 let result = tools::file_write(&workspace, args).await?;
                 self.invalidate_cache(args);
+                self.record_write(&workspace, args);
                 result
             }
             "file_edit" => {
                 let result = tools::file_edit(&workspace, args).await?;
                 self.invalidate_cache(args);
+                self.record_write(&workspace, args);
                 result
             }
             "shell" => {
@@ -182,6 +195,21 @@ impl ToolExecutor {
             let resolved = self.workspace.join(path_str);
             if let Ok(canonical) = resolved.canonicalize() {
                 self.file_cache.lock().unwrap().remove(&canonical);
+            }
+        }
+    }
+
+    /// Record a file write in the ledger so the watcher can suppress
+    /// the resulting filesystem event. No-op if no ledger is set.
+    fn record_write(&self, workspace: &Path, args: &Value) {
+        if let Some(ref ledger) = self.write_ledger {
+            if let Some(path_str) = args.get("path").and_then(|v| v.as_str()) {
+                let full_path = workspace.join(path_str);
+                if let Ok(meta) = std::fs::metadata(&full_path) {
+                    if let Ok(mtime) = meta.modified() {
+                        ledger.record(full_path, mtime);
+                    }
+                }
             }
         }
     }

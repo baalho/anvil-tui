@@ -1,4 +1,5 @@
 use anyhow::Result;
+use anvil_llm::ChatMessage;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -161,6 +162,32 @@ impl SessionStore {
                 ",
             )?;
             tracing::info!("migrated sessions table: added agent state columns (v1.9)");
+        }
+
+        // v2.1: Incremental turn message persistence.
+        // Stores the full ChatMessage JSON per row so crash recovery
+        // can reconstruct the exact conversation state without relying
+        // on the decomposed `messages` table.
+        let has_turn_messages: bool = self
+            .conn
+            .prepare("SELECT id FROM turn_messages LIMIT 0")
+            .is_ok();
+        if !has_turn_messages {
+            self.conn.execute_batch(
+                "
+                CREATE TABLE turn_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    message_json TEXT NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    FOREIGN KEY (session_id) REFERENCES sessions(id)
+                );
+                CREATE INDEX idx_turn_messages_session
+                    ON turn_messages(session_id, seq);
+                ",
+            )?;
+            tracing::info!("created turn_messages table (v2.1)");
         }
 
         Ok(())
@@ -330,6 +357,60 @@ impl SessionStore {
                 now,
                 session_id,
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Append a single ChatMessage to the turn log.
+    ///
+    /// Called after each message is added to the agent's message history
+    /// during a turn. If the daemon crashes mid-turn, all messages up to
+    /// the crash point are recoverable from this table.
+    pub fn append_turn_message(
+        &self,
+        session_id: &str,
+        seq: usize,
+        message: &ChatMessage,
+    ) -> Result<()> {
+        let json = serde_json::to_string(message)?;
+        self.conn.execute(
+            "INSERT INTO turn_messages (session_id, seq, message_json)
+             VALUES (?1, ?2, ?3)",
+            params![session_id, seq as i64, json],
+        )?;
+        Ok(())
+    }
+
+    /// Load all turn messages for a session, ordered by sequence number.
+    ///
+    /// Returns the full `Vec<ChatMessage>` for session resume. Falls back
+    /// gracefully if the table doesn't exist (pre-v2.1 databases).
+    pub fn load_turn_messages(&self, session_id: &str) -> Result<Vec<ChatMessage>> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT message_json FROM turn_messages
+             WHERE session_id = ?1 ORDER BY seq",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Ok(Vec::new()), // pre-v2.1 database
+        };
+
+        let messages: Vec<ChatMessage> = stmt
+            .query_map(params![session_id], |row| {
+                let json: String = row.get(0)?;
+                Ok(json)
+            })?
+            .filter_map(|r| r.ok())
+            .filter_map(|json| serde_json::from_str(&json).ok())
+            .collect();
+
+        Ok(messages)
+    }
+
+    /// Clear turn messages for a session (called on session end or compaction).
+    pub fn clear_turn_messages(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM turn_messages WHERE session_id = ?1",
+            params![session_id],
         )?;
         Ok(())
     }
@@ -630,6 +711,72 @@ mod tests {
 
         let loaded = store.load_snapshot(&session.id).unwrap().unwrap();
         assert!(loaded.active_skills.is_empty());
+    }
+
+    #[test]
+    fn append_and_load_turn_messages() {
+        let store = test_store();
+        let session = store.create_session().unwrap();
+
+        let msg1 = ChatMessage::user("hello");
+        let msg2 = ChatMessage::assistant("hi there");
+
+        store.append_turn_message(&session.id, 0, &msg1).unwrap();
+        store.append_turn_message(&session.id, 1, &msg2).unwrap();
+
+        let loaded = store.load_turn_messages(&session.id).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].role, anvil_llm::Role::User);
+        assert_eq!(loaded[1].role, anvil_llm::Role::Assistant);
+        assert_eq!(loaded[0].content.as_deref(), Some("hello"));
+        assert_eq!(loaded[1].content.as_deref(), Some("hi there"));
+    }
+
+    #[test]
+    fn load_turn_messages_empty_session() {
+        let store = test_store();
+        let session = store.create_session().unwrap();
+
+        let loaded = store.load_turn_messages(&session.id).unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn load_turn_messages_nonexistent_session() {
+        let store = test_store();
+        let loaded = store.load_turn_messages("nonexistent").unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn clear_turn_messages() {
+        let store = test_store();
+        let session = store.create_session().unwrap();
+
+        store
+            .append_turn_message(&session.id, 0, &ChatMessage::user("test"))
+            .unwrap();
+        assert_eq!(store.load_turn_messages(&session.id).unwrap().len(), 1);
+
+        store.clear_turn_messages(&session.id).unwrap();
+        assert!(store.load_turn_messages(&session.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn turn_messages_preserve_order() {
+        let store = test_store();
+        let session = store.create_session().unwrap();
+
+        for i in 0..5 {
+            let msg = ChatMessage::user(&format!("msg-{i}"));
+            store.append_turn_message(&session.id, i, &msg).unwrap();
+        }
+
+        let loaded = store.load_turn_messages(&session.id).unwrap();
+        assert_eq!(loaded.len(), 5);
+        for (i, msg) in loaded.iter().enumerate() {
+            assert_eq!(msg.content.as_deref(), Some(format!("msg-{i}").as_str()));
+        }
     }
 }
 

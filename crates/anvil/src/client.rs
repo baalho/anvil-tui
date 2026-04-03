@@ -8,11 +8,12 @@ use crate::ipc::{self, Request, Response};
 use anyhow::{bail, Result};
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use std::io::{self, Write};
+use std::path::Path;
 use tokio::net::UnixStream;
 
-/// Connect to the daemon socket.
-async fn connect() -> Result<UnixStream> {
-    let path = ipc::socket_path();
+/// Connect to the daemon socket for the given workspace.
+async fn connect(workspace: &Path) -> Result<UnixStream> {
+    let path = ipc::socket_path(workspace);
     match UnixStream::connect(&path).await {
         Ok(stream) => Ok(stream),
         Err(e) => bail!(
@@ -28,8 +29,8 @@ async fn connect() -> Result<UnixStream> {
 /// Content deltas go to stdout (clean, pipe-friendly).
 /// Tool calls, thinking, and errors go to stderr (diagnostics).
 /// Returns exit code: 0 on success, 1 on error.
-pub async fn send_prompt(text: &str, auto_approve: bool) -> Result<i32> {
-    let stream = connect().await?;
+pub async fn send_prompt(workspace: &Path, text: &str, auto_approve: bool) -> Result<i32> {
+    let stream = connect(workspace).await?;
     let (reader, writer) = stream.into_split();
     let mut reader = tokio::io::BufReader::new(reader);
     let mut writer = tokio::io::BufWriter::new(writer);
@@ -108,8 +109,8 @@ pub async fn send_prompt(text: &str, auto_approve: bool) -> Result<i32> {
 }
 
 /// Query daemon status and print it.
-pub async fn daemon_status() -> Result<()> {
-    let stream = connect().await?;
+pub async fn daemon_status(workspace: &Path) -> Result<()> {
+    let stream = connect(workspace).await?;
     let (reader, writer) = stream.into_split();
     let mut reader = tokio::io::BufReader::new(reader);
     let mut writer = tokio::io::BufWriter::new(writer);
@@ -139,7 +140,7 @@ pub async fn daemon_status() -> Result<()> {
             println!("  model:   {model}");
             println!("  mode:    {mode}");
             println!("  uptime:  {hours}h {mins}m {secs}s");
-            println!("  socket:  {}", ipc::socket_path().display());
+            println!("  socket:  {}", ipc::socket_path(workspace).display());
         }
         Response::Error { message } => {
             bail!("daemon error: {message}");
@@ -153,8 +154,8 @@ pub async fn daemon_status() -> Result<()> {
 }
 
 /// Send a shutdown request to the daemon.
-pub async fn daemon_stop() -> Result<()> {
-    let stream = connect().await?;
+pub async fn daemon_stop(workspace: &Path) -> Result<()> {
+    let stream = connect(workspace).await?;
     let (reader, writer) = stream.into_split();
     let mut reader = tokio::io::BufReader::new(reader);
     let mut writer = tokio::io::BufWriter::new(writer);

@@ -1,6 +1,6 @@
 [package]
 name = "anvil-config"
-version = "2.0.0"
+version = "2.1.0"
 description = "TOML config, .anvil/ harness directory, provider settings"
 edition.workspace = true
 license.workspace = true
