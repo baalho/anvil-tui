@@ -1,3 +1,8 @@
+//! Token usage tracking and cost estimation.
+//!
+//! Accumulates prompt/completion token counts across turns. Optional
+//! pricing config enables cost estimation for remote/paid APIs.
+
 use anvil_config::PricingConfig;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

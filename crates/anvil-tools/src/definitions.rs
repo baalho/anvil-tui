@@ -1,3 +1,8 @@
+//! Tool JSON schema definitions sent to the LLM in the `tools` array.
+//!
+//! Each definition follows the OpenAI function calling format. The LLM uses
+//! these to decide which tool to call and how to format arguments.
+
 use serde_json::{json, Value};
 
 pub fn all_tool_definitions() -> Vec<Value> {

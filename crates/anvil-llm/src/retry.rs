@@ -1,3 +1,9 @@
+//! Retry logic for LLM API requests.
+//!
+//! Distinguishes retryable errors (429, 503, timeouts) from permanent ones
+//! (400, 404). Exponential backoff with jitter. The `tool_choice` fallback
+//! for MLX (retry without `tool_choice` on 400/422) is handled here.
+
 use std::future::Future;
 use std::time::{Duration, SystemTime};
 

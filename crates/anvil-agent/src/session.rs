@@ -1,3 +1,15 @@
+//! SQLite-backed session persistence.
+//!
+//! Manages conversation history, session snapshots, and turn-level
+//! message storage for crash recovery.
+//!
+//! ## Migrations
+//!
+//! - **001**: `sessions` + `messages` tables — basic conversation storage.
+//! - **002**: `snapshots` table — mode/persona/skills/profile metadata.
+//! - **003**: `turn_messages` table — incremental `ChatMessage` JSON append
+//!   for exact crash recovery.
+
 use anyhow::Result;
 use anvil_llm::ChatMessage;
 use chrono::{DateTime, Utc};

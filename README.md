@@ -1,7 +1,7 @@
 # Anvil
 
 A terminal coding agent forged in Rust. Connects to local models via Ollama,
-llama-server, or MLX. Runs offline. Works airgapped. Version 2.0.
+llama-server, or MLX. Runs offline. Works airgapped. Version 2.1.
 
 ## Install (macOS / Apple Silicon)
 
@@ -41,9 +41,10 @@ anvil run -p "fix the build" -y
 anvil run -p "fix all failing tests" -a --verify "cargo test"
 ```
 
-## Daemon Mode (v2.0)
+## Daemon Mode
 
 Run Anvil as a background server. Send prompts from any terminal.
+Each workspace gets its own daemon socket — multiple projects run concurrently.
 
 ```bash
 # Start the daemon
@@ -63,7 +64,8 @@ anvil daemon stop
 
 ## Watch Mode
 
-Monitor your workspace for file changes and react automatically:
+Monitor your workspace for file changes and react automatically.
+Agent's own file writes are suppressed via mtime ledger to prevent feedback loops.
 
 ```bash
 anvil watch                          # watch with 2s debounce
@@ -130,7 +132,7 @@ anvil run -p "fix all tests" -a --verify "cargo test" --max-iterations 5
 ```
 
 ### Session Persistence
-SQLite-backed sessions with full state snapshots. Resume with
+SQLite-backed sessions with incremental crash recovery. Resume with
 `anvil -c`. Daemon mode preserves state across restarts.
 
 ### Launch Profiles

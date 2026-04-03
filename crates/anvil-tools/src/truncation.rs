@@ -1,3 +1,9 @@
+//! Output truncation — keeps the tail of tool output, saves full content to a temp file.
+//!
+//! When a shell command or file read produces large output, this module keeps
+//! the last N lines (most relevant for error diagnosis) and writes the full
+//! output to a temp file referenced in the truncation notice.
+
 use std::io::Write;
 use std::path::PathBuf;
 

@@ -1,3 +1,8 @@
+//! SSE stream parser for chunked LLM responses.
+//!
+//! Parses `text/event-stream` data from OpenAI-compatible endpoints into
+//! typed [`StreamEvent`] variants (content delta, tool call, usage, done).
+
 use crate::message::{ApiUsage, ToolCall, ToolCallFunction};
 use serde::Deserialize;
 

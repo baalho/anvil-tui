@@ -1,7 +1,7 @@
 # Anvil Manual
 
 A local-first coding agent forged in Rust. Runs offline, connects to
-Ollama, llama-server, or MLX. Version 2.0.
+Ollama, llama-server, or MLX. Version 2.1.
 
 ---
 
@@ -339,11 +339,13 @@ nohup anvil daemon start > /tmp/anvil-daemon.log 2>&1 &
 # Or use a systemd service / launchd plist for production
 ```
 
-The daemon binds a Unix domain socket at:
-- Linux: `$XDG_RUNTIME_DIR/anvil/daemon.sock`
-- macOS: `/tmp/anvil-$UID/daemon.sock`
+The daemon binds a workspace-scoped Unix domain socket:
+- Linux: `$XDG_RUNTIME_DIR/anvil/daemon-<hash>.sock`
+- macOS: `/tmp/anvil-$UID/daemon-<hash>.sock`
 
-The socket is created with `0600` permissions (owner-only access).
+The `<hash>` is derived from the canonical workspace path, so multiple
+daemons can run concurrently in different projects without collision.
+The socket directory is created with `0700` permissions (owner-only).
 
 ### Sending prompts
 
@@ -370,7 +372,7 @@ anvil daemon status
 #     model:   qwen3-coder:30b
 #     mode:    coding
 #     uptime:  1h 23m 45s
-#     socket:  /tmp/anvil-501/daemon.sock
+#     socket:  /tmp/anvil-501/daemon-a1b2c3.sock
 ```
 
 ### Stopping the daemon
@@ -441,6 +443,15 @@ Editors save files in multiple steps (write temp, rename, chmod).
 Anvil collects events into a batch and waits for a quiet period
 before triggering. The default 2-second debounce prevents spamming
 the LLM with intermediate saves.
+
+### Feedback loop prevention
+
+When the agent writes a file via `file_write` or `file_edit`, the
+watcher would normally see the change and trigger another turn,
+creating an infinite loop. Anvil prevents this with a write ledger:
+after each file write, the path and its mtime are recorded. When the
+watcher sees a change, it checks the ledger — if the mtime matches,
+the event is the agent's own write and is silently dropped.
 
 ### Watch mode permissions
 
@@ -541,16 +552,20 @@ Auto-applied when the model name matches `match_patterns`.
 
 ### Bundled profiles
 
-| Profile | Match Pattern | Context | Backend |
-|---------|--------------|---------|---------|
+| Profile | Match Pattern | Default Context | Backend |
+|---------|--------------|-----------------|---------|
 | Qwen3-Coder | qwen3-coder | 32K | Ollama |
-| Qwen3-Coder TQ4 | qwen3-coder-tq4 | 262K | llama-server |
-| Qwen3-Coder TQ3 | qwen3-coder-tq3 | 512K | llama-server |
-| Qwen3 | qwen3 | 32K | Ollama |
-| Devstral | devstral | 32K | Ollama |
-| DeepSeek-R1 | deepseek-r1 | 32K | Ollama |
-| GLM-4.7-Flash | glm-4 | 16K | llama-server |
-| MLX Default | mlx-community | 32K | MLX |
+| Qwen3-Coder TQ4 | qwen3-coder-tq4 | 32K (262K max) | llama-server |
+| Qwen3-Coder TQ3 | qwen3-coder-tq3 | 32K (512K max) | llama-server |
+| Qwen3 | qwen3: | 16K | Ollama |
+| Qwen3.5 | qwen3.5 | 32K | llama-server |
+| Qwen2.5-Coder | qwen2.5-coder | 16K | Ollama |
+| Qwen2.5 | qwen2.5: | 16K | Ollama |
+| Devstral | devstral | 16K | Ollama |
+| DeepSeek-R1 | deepseek-r1 | 16K | Ollama |
+| Nemotron-Cascade-2 | nemotron-cascade | 32K | Ollama |
+| GLM-4.7-Flash | glm-4.7-flash | 16K | llama-server |
+| MLX Default | mlx-community | 16K | MLX |
 
 ### Profile format
 
@@ -787,6 +802,15 @@ anvil send "prompt"
 
 The dispatch loop is the sole owner of the Agent. No concurrent
 access, no Arc/Mutex. Tasks queue naturally in the mpsc channel.
+
+**Backpressure shedding**: If a client can't receive data within 3
+seconds, the connection is dropped. The agent continues its turn —
+work is never lost due to a slow or dead client.
+
+**Crash recovery**: Every message pushed to the agent's context is
+appended to the `turn_messages` SQLite table. On resume, exact
+`ChatMessage` JSON is restored rather than reconstructed from
+decomposed fields.
 
 ### How to add a new tool
 

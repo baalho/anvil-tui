@@ -1,3 +1,8 @@
+//! Tool implementations — 11 deterministic tools for filesystem, shell, and git.
+//!
+//! Each tool is an async function taking a workspace path and JSON arguments.
+//! All file paths are resolved relative to the workspace root with traversal prevention.
+
 use anyhow::{bail, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};

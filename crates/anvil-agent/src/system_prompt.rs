@@ -1,3 +1,9 @@
+//! Layered system prompt builder.
+//!
+//! Constructs the system prompt from multiple layers: base instructions,
+//! active skills, context.md, project detection (Rust/Node/Python/Go/Docker),
+//! memory, inventory, and devcontainer detection.
+
 use crate::memory::MemoryStore;
 use crate::skills::Skill;
 use std::path::Path;

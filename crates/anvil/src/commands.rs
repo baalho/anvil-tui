@@ -1,3 +1,7 @@
+//! Slash command handler — 17 interactive commands dispatched from the readline loop.
+//!
+//! Commands start with `/` and are handled synchronously before the next prompt.
+
 use anvil_agent::{Agent, MemoryStore, SkillLoader};
 use anvil_llm::TokenUsage;
 

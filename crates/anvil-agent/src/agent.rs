@@ -1,3 +1,10 @@
+//! Core agent loop — prompt → LLM → tool execution → repeat.
+//!
+//! The [`Agent`] struct owns the conversation state, tool executor,
+//! and LLM client. Each call to [`Agent::turn`] runs one complete
+//! prompt-response-tool cycle. Messages are appended to the `turn_messages`
+//! SQLite table for crash recovery.
+
 use crate::mode::Mode;
 use crate::routing::ModelRouter;
 use crate::session::{SessionStatus, SessionStore, ToolCallEntry};

@@ -153,7 +153,7 @@ These prevent real bugs. Don't violate them.
 - **Profiles over manual setup**: Kids can't type `/persona sparkle` + `/mode creative` + `/skill cool-stuff`. One `anvil -p sparkle` flag does everything.
 - **Project detection is lightweight**: Only check file existence, don't parse contents. The model needs a hint ("Rust project"), not a full analysis.
 - **tool_choice fallback for MLX**: MLX rejects `tool_choice` with 400/422. Client retries once without it. Don't fail the whole request over a hint parameter.
-- **BYOB over process management**: Anvil is a CLI agent, not a process supervisor. Use Zellij layouts to manage backend lifecycle. A `backend.rs` process manager was built — Zellij is simpler.
+- **BYOB over process management**: Anvil is a CLI agent, not a process supervisor. Use Zellij layouts to manage backend lifecycle. `backend.rs` exists for optional managed backends but Zellij is the preferred approach.
 - **Static context over auto-sizing**: Model profiles declare `recommended_context` statically. No GGUF parsing, no memory math. Trust the profile.
 - **Event enum over trait dispatch**: `Event` is an enum, not `Box<dyn EventSource>`. Compiler verifies exhaustiveness. Adding a v2.0 UDS variant is one match arm, not a trait implementation.
 - **Snapshot metadata, not message re-serialization**: `SessionSnapshot` stores mode/persona/skills/profile — not messages. Messages are already saved individually during the turn. Don't serialize the same data twice.
@@ -189,6 +189,11 @@ Before any change:
 | `crates/anvil/src/commands.rs` | 17 slash commands (including /mode, /selftest) |
 | `crates/anvil/src/interactive.rs` | Readline loop, streaming display, status line |
 | `crates/anvil/src/render.rs` | Renderer trait, TerminalRenderer |
+| `crates/anvil/src/backend.rs` | Optional managed backend process (start/stop/health-check) |
+| `crates/anvil/src/watcher.rs` | File watcher (notify crate), debounce, noise filtering |
+| `crates/anvil/src/ipc.rs` | IPC wire protocol: length-prefixed JSON, Request/Response enums |
+| `crates/anvil/src/daemon.rs` | Daemon server: UDS listener, DaemonTask queue, dispatch loop |
+| `crates/anvil/src/client.rs` | IPC client: send prompt, daemon status/stop |
 | `crates/anvil-agent/src/agent.rs` | Agent::turn() core loop, mode-aware tool_choice |
 | `crates/anvil-agent/src/mode.rs` | Mode enum (Coding, Creative) |
 | `crates/anvil-agent/src/skills.rs` | Skill parsing, YAML frontmatter |
@@ -196,26 +201,48 @@ Before any change:
 | `crates/anvil-agent/src/achievements.rs` | Badge system, session tracker |
 | `crates/anvil-agent/src/persona.rs` | 4 personas (sparkle, bolt, codebeard, homelab) |
 | `crates/anvil-agent/src/system_prompt.rs` | Layered prompt builder with tool-use guidance, devcontainer detection |
+| `crates/anvil-agent/src/event.rs` | Source-agnostic Event enum (v2.0 bridge) |
+| `crates/anvil-agent/src/dispatch.rs` | Event dispatch — routes events to agent.turn() |
+| `crates/anvil-agent/src/session.rs` | SessionStore (SQLite), SessionSnapshot, migrations 001–003 |
+| `crates/anvil-agent/src/routing.rs` | Model routing — route specific tools to different models |
+| `crates/anvil-agent/src/memory.rs` | Persistent learned patterns (categorized markdown in `.anvil/memory/`) |
+| `crates/anvil-agent/src/thinking.rs` | ThinkingFilter — parse `<thinking>` blocks from streaming output |
+| `crates/anvil-agent/src/json_filter.rs` | Extract JSON from model output (handles persona bleed) |
 | `crates/anvil-config/src/profiles.rs` | 12 model profiles with capability tags and KV cache config |
 | `crates/anvil-config/src/bundled_skills.rs` | 22 bundled skills |
 | `crates/anvil-config/src/bundled_layouts.rs` | 3 bundled Zellij layouts (TQ, dev, ops) |
-| `crates/anvil-agent/src/event.rs` | Source-agnostic Event enum (v2.0 bridge) |
-| `crates/anvil-agent/src/dispatch.rs` | Event dispatch — routes events to agent.turn() |
 | `crates/anvil-config/src/inventory.rs` | Host/service inventory with deployment support |
-| `crates/anvil-config/src/settings.rs` | Settings struct, MCP config |
+| `crates/anvil-config/src/settings.rs` | Settings struct, launch profiles, MCP config |
+| `crates/anvil-config/src/provider.rs` | BackendKind enum (Ollama, LlamaServer, Mlx, Custom), ProviderConfig |
 | `crates/anvil-llm/src/client.rs` | LlmClient, streaming, retry, tool_choice fallback |
+| `crates/anvil-llm/src/message.rs` | ChatMessage, ToolCall, ToolChoice, ChatRequest |
+| `crates/anvil-llm/src/stream.rs` | SSE stream parser for chunked LLM responses |
 | `crates/anvil-tools/src/tools.rs` | 11 tool implementations |
-| `crates/anvil-tools/src/executor.rs` | Tool dispatch, validation |
+| `crates/anvil-tools/src/executor.rs` | Tool dispatch, validation, WriteLedger integration |
+| `crates/anvil-tools/src/definitions.rs` | Tool JSON schema definitions for the LLM |
 | `crates/anvil-tools/src/hooks.rs` | Pre/post hooks, platform-agnostic script discovery |
-| `crates/anvil-mcp/src/manager.rs` | MCP server lifecycle |
-| `crates/anvil/src/watcher.rs` | File watcher (notify crate), debounce, noise filtering |
-| `crates/anvil/src/ipc.rs` | IPC wire protocol: length-prefixed JSON, Request/Response enums |
-| `crates/anvil/src/daemon.rs` | Daemon server: UDS listener, DaemonTask queue, dispatch loop |
-| `crates/anvil/src/client.rs` | IPC client: send prompt, daemon status/stop |
+| `crates/anvil-tools/src/permission.rs` | Tool permission system (auto-approve, prompt, deny) |
+| `crates/anvil-tools/src/truncation.rs` | Tail-truncation of tool output, temp file for full content |
 | `crates/anvil-tools/src/ledger.rs` | WriteLedger: mtime tracking to prevent watcher feedback loops |
+| `crates/anvil-mcp/src/manager.rs` | MCP server lifecycle, tool namespacing |
+
+## Test Inventory
+
+319 tests across all crates. Run with `cargo test`.
+
+| Crate | Tests | Notes |
+|-------|-------|-------|
+| `anvil` (binary) | 32 | IPC, daemon, watcher, renderer, backend, commands |
+| `anvil-agent` | 136 | Agent loop, session store, events, dispatch, skills, personas, routing, memory, thinking. 3 env-dependent failures (devcontainer detection — pass on bare metal, fail inside containers) |
+| `anvil-tools` | 82 | 27 unit + 2 definition + 53 integration (tool execution) |
+| `anvil-config` | 37 | Settings, profiles, skills, layouts, inventory. 1 failure: `settings_without_profiles_parses` — `base_url` missing `#[serde(default)]` |
+| `anvil-llm` | 22 | 14 unit + 8 integration (streaming) |
+| `anvil-mcp` | 10 | Client, types, JSON-RPC |
 
 ## Known Issues
 
 1. Ollama defaults to 2048 context — set `OLLAMA_NUM_CTX` or use model profile
 2. MLX tool calling varies by model — `tool_choice` auto-stripped on 400/422
 3. GLM-4.7-Flash has chat template bugs on Ollama — use llama-server with `--jinja`
+4. 3 tests in `anvil-agent` fail inside devcontainers (`.dockerenv` detected before other signals) — pass on bare metal
+5. 1 test in `anvil-config` fails: `settings_without_profiles_parses` — `ProviderConfig.base_url` lacks `#[serde(default)]` so partial TOML without `base_url` fails to parse

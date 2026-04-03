@@ -1,3 +1,8 @@
+//! Interactive readline loop — the primary user interface for Anvil.
+//!
+//! Handles prompt input, streaming LLM output display, status line updates,
+//! slash command dispatch, and achievement notifications.
+
 use anvil_agent::{
     AchievementStore, Agent, AgentEvent, AutonomousConfig, AutonomousRunner, IterationResult,
     SessionTracker,
