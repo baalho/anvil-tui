@@ -60,12 +60,14 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub backend: BackendKind,
     /// Base URL for the OpenAI-compatible API (e.g. "http://localhost:11434/v1").
+    #[serde(default)]
     pub base_url: String,
     /// API key — use `$ENV_VAR` syntax to reference environment variables.
     /// Ollama and llama-server typically don't need this.
     #[serde(default)]
     pub api_key: Option<String>,
     /// Model identifier (e.g. "qwen3-coder:30b", "devstral:latest").
+    #[serde(default)]
     pub model: String,
     /// Optional pricing for cost estimation. Irrelevant for local models.
     #[serde(default)]

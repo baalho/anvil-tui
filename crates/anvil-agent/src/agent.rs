@@ -805,6 +805,12 @@ impl Agent {
             // Build tools and tool_choice based on active mode.
             // Creative mode omits tools entirely so the model responds directly.
             // Coding mode sends all tools with tool_choice: "auto".
+            // Kids personas/skills force tool_choice: "required" to ensure ACTION-FIRST behavior.
+            let is_kids_mode = self.persona().map_or(false, |p| crate::persona::is_kids_persona(&p.key))
+                || self.has_active_skill("kids-first")
+                || self.has_active_skill("kids-game")
+                || self.has_active_skill("kids-story");
+
             let (tools, tool_choice) = match self.mode {
                 Mode::Creative => (None, Some(anvil_llm::ToolChoice::none())),
                 Mode::Coding => {
@@ -813,7 +819,12 @@ impl Agent {
                     tool_defs.extend(mcp_defs);
                     let tools_json: Vec<anvil_llm::ToolDefinition> =
                         serde_json::from_value(serde_json::Value::Array(tool_defs))?;
-                    (Some(tools_json), Some(anvil_llm::ToolChoice::auto()))
+                    let choice = if is_kids_mode {
+                        anvil_llm::ToolChoice::required()
+                    } else {
+                        anvil_llm::ToolChoice::auto()
+                    };
+                    (Some(tools_json), Some(choice))
                 }
             };
 

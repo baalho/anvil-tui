@@ -53,6 +53,23 @@ pub struct LaunchProfile {
     /// Model to use (overrides provider.model).
     #[serde(default)]
     pub model: String,
+    /// Override the backend base URL for this profile.
+    ///
+    /// # Why this exists
+    /// When running two MLX servers (e.g. LFM2 on :8081 for kids, Qwen3 on
+    /// :8080 for coding), each launch profile needs to point at the right
+    /// server. Without this, all profiles share the global `provider.base_url`
+    /// regardless of which model they request.
+    ///
+    /// Example:
+    /// ```toml
+    /// [[profiles]]
+    /// name = "sparkle"
+    /// model = "lfm2"
+    /// base_url = "http://localhost:8081/v1"  # kids server
+    /// ```
+    #[serde(default)]
+    pub base_url: String,
 }
 
 /// MCP server configuration — connects to external tool servers.
@@ -182,6 +199,29 @@ fn default_auto_compact_threshold() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_profile_with_base_url() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "sparkle"
+            persona = "sparkle"
+            mode = "creative"
+            skills = ["kids-first"]
+            model = "lfm2"
+            base_url = "http://localhost:8081/v1"
+
+            [[profiles]]
+            name = "code"
+            mode = "coding"
+            model = "qwen3-coder-next"
+        "#;
+        let settings: Settings = toml::from_str(toml_str).unwrap();
+        assert_eq!(settings.profiles.len(), 2);
+        assert_eq!(settings.profiles[0].base_url, "http://localhost:8081/v1");
+        // base_url is optional — defaults to empty
+        assert!(settings.profiles[1].base_url.is_empty());
+    }
 
     #[test]
     fn parse_settings_with_profiles() {

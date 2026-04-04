@@ -31,13 +31,12 @@ impl Mode {
 
     /// The default mode for a given persona key.
     ///
-    /// Kids personas default to Creative (they want fun output, not tool calls).
-    /// Homelab defaults to Coding (infrastructure work needs shell/file tools).
-    pub fn for_persona(persona_key: &str) -> Self {
-        match persona_key.to_lowercase().as_str() {
-            "sparkle" | "bolt" | "codebeard" => Self::Creative,
-            _ => Self::Coding,
-        }
+    /// All personas default to Coding mode — tools are essential for every
+    /// use case. Kids personas need `file_write` + `shell` to create and run
+    /// programs. The persona provides personality; mode controls tool access.
+    /// Users can override with `/mode creative` for pure chat.
+    pub fn for_persona(_persona_key: &str) -> Self {
+        Self::Coding
     }
 
     /// System prompt suffix injected when this mode is active.
@@ -80,11 +79,12 @@ mod tests {
     }
 
     #[test]
-    fn kids_personas_default_to_creative() {
-        assert_eq!(Mode::for_persona("sparkle"), Mode::Creative);
-        assert_eq!(Mode::for_persona("Sparkle"), Mode::Creative);
-        assert_eq!(Mode::for_persona("bolt"), Mode::Creative);
-        assert_eq!(Mode::for_persona("codebeard"), Mode::Creative);
+    fn kids_personas_default_to_coding() {
+        // Kids personas need tools (file_write + shell) to create and run programs
+        assert_eq!(Mode::for_persona("sparkle"), Mode::Coding);
+        assert_eq!(Mode::for_persona("Sparkle"), Mode::Coding);
+        assert_eq!(Mode::for_persona("bolt"), Mode::Coding);
+        assert_eq!(Mode::for_persona("codebeard"), Mode::Coding);
     }
 
     #[test]

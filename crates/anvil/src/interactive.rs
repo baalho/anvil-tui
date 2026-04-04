@@ -132,7 +132,12 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
             .model()
             .strip_suffix(":latest")
             .unwrap_or(agent.model());
-        let status = if let Some(persona) = agent.persona() {
+        let persona = agent.persona();
+        let is_kids_persona = persona.as_ref().map_or(false, |p| anvil_agent::is_kids_persona(&p.key));
+
+        let status = if is_kids_persona {
+            String::new()
+        } else if let Some(ref persona) = persona {
             format!("[{}|{}|{}]", persona.key, agent.mode(), model_short)
         } else {
             format!("[{}|{}]", agent.mode(), model_short)
@@ -408,6 +413,16 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         pending_triggers.extend(session_tracker.record_message());
 
         let prompt_owned = trimmed.to_string();
+        // Capture kids mode before taking the agent — kids auto-approve all tools
+        // because a 7-year-old can't understand "Allow file_write? [y/n/a]".
+        // Check both persona AND active skills — covers manual `/skill kids-game` too.
+        let is_kids_turn = agent
+            .persona()
+            .map(|p| anvil_agent::is_kids_persona(&p.key))
+            .unwrap_or(false)
+            || agent.has_active_skill("kids-first")
+            || agent.has_active_skill("kids-game")
+            || agent.has_active_skill("kids-story");
         let mut moved_agent = agent_slot.take().unwrap();
         let turn_cancel = cancel.clone();
         let turn_handle = tokio::spawn(async move {
@@ -461,6 +476,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         let mut spinner_stopped = false;
         let mut spinner_handle = Some(spinner_handle);
         let mut in_thinking_block = false;
+        let mut turn_complete_fired = false;
         while let Some(event) = event_rx.recv().await {
             // Stop spinner on first event
             if !spinner_stopped {
@@ -506,9 +522,28 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         println!();
                         needs_newline = false;
                     }
-                    let icon = tool_icon(&name);
-                    let short_args = truncate_display(&arguments, 80);
-                    renderer.render_tool_pending(&name, icon, &short_args);
+
+                    if is_kids_turn {
+                        // Kids see fun messages instead of JSON and file paths
+                        let msg = match name.as_str() {
+                            "file_write" => "  ✨ *writing some magic code...*\n",
+                            "file_edit" => "  ✨ *changing the magic...*\n",
+                            "shell" => "  🚀 *running it...*\n",
+                            _ => "", // hide other tools entirely
+                        };
+                        if !msg.is_empty() {
+                            let _ = crossterm::execute!(
+                                io::stdout(),
+                                crossterm::style::SetForegroundColor(crossterm::style::Color::Magenta),
+                                crossterm::style::Print(msg),
+                                crossterm::style::ResetColor,
+                            );
+                        }
+                    } else {
+                        let icon = tool_icon(&name);
+                        let short_args = truncate_display(&arguments, 80);
+                        renderer.render_tool_pending(&name, icon, &short_args);
+                    }
 
                     // Track files created for session summary
                     if name == "file_write" {
@@ -522,18 +557,61 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                     // Track tool usage for achievements
                     pending_triggers.extend(session_tracker.record_tool_call(&name, &arguments));
 
-                    let decision = prompt_permission(&name, &arguments)?;
+                    // Kids personas auto-approve all tool calls — permission
+                    // prompts are incomprehensible to a 7-year-old.
+                    let decision = if is_kids_turn {
+                        PermissionDecision::Allow
+                    } else {
+                        prompt_permission(&name, &arguments)?
+                    };
                     let _ = perm_tx.send(decision).await;
                 }
                 AgentEvent::ToolResult { name, result } => {
                     // Track tool usage for session summary
                     *tool_use_counts.entry(name.clone()).or_insert(0) += 1;
 
-                    let icon = tool_icon(&name);
-                    let text = result.text();
-                    let lines = text.lines().count();
-                    let chars = text.len();
-                    renderer.render_tool_result(&name, icon, lines, chars);
+                    if is_kids_turn {
+                        // Kids see the actual program output — strip shell metadata
+                        if name == "shell" {
+                            let text = result.text();
+                            // Strip "exit code:", "stdout:", "stderr:" and "error: command timed out" prefixes
+                            let clean = text
+                                .lines()
+                                .map(|l| l.trim())
+                                .filter(|line| {
+                                    !line.starts_with("exit code:")
+                                        && !line.starts_with("stdout:")
+                                        && !line.starts_with("stderr:")
+                                        && !line.starts_with("error: command timed out")
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if !clean.trim().is_empty() {
+                                let _ = crossterm::execute!(
+                                    io::stdout(),
+                                    crossterm::style::SetForegroundColor(crossterm::style::Color::Green),
+                                    crossterm::style::Print(format!("{}\n", clean.trim())),
+                                    crossterm::style::ResetColor,
+                                );
+                            }
+                            // Show kid-friendly timeout message
+                            if text.contains("timed out") {
+                                let _ = crossterm::execute!(
+                                    io::stdout(),
+                                    crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
+                                    crossterm::style::Print("  ⏰ *oops, that took too long! let me try again...*\n"),
+                                    crossterm::style::ResetColor,
+                                );
+                            }
+                        }
+                        // file_write/file_edit results are silently swallowed
+                    } else {
+                        let icon = tool_icon(&name);
+                        let text = result.text();
+                        let lines = text.lines().count();
+                        let chars = text.len();
+                        renderer.render_tool_result(&name, icon, lines, chars);
+                    }
                 }
                 AgentEvent::Usage(u) => {
                     cumulative_usage.prompt_tokens += u.prompt_tokens;
@@ -545,22 +623,10 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         println!();
                         needs_newline = false;
                     }
-
-                    // Unlock any achievements triggered during this turn
-                    let agent = agent_slot.as_ref().expect("agent lost");
-                    let persona = agent.persona().map(|p| p.key.as_str());
-                    for key in pending_triggers.drain(..) {
-                        if let Some(badge) = achievement_store.unlock(key, persona) {
-                            let msg = AchievementStore::format_unlock(badge, persona);
-                            execute!(
-                                io::stdout(),
-                                SetForegroundColor(Color::Yellow),
-                                Print(format!("  {msg}\n")),
-                                ResetColor,
-                            )?;
-                        }
-                    }
-
+                    // Signal that achievements should fire after agent is returned.
+                    // We cannot access agent_slot here — it is None while the agent
+                    // is inside the spawned task. Defer to after turn_handle.await.
+                    turn_complete_fired = true;
                     println!();
                 }
                 AgentEvent::AutoCompacted {
@@ -654,6 +720,26 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         match turn_handle.await {
             Ok((returned_agent, result)) => {
                 agent_slot = Some(returned_agent);
+
+                // Process achievements now that the agent is back in agent_slot
+                if turn_complete_fired {
+                    if let Some(agent) = agent_slot.as_ref() {
+                        let persona = agent.persona().map(|p| p.key.as_str());
+                        for key in pending_triggers.drain(..) {
+                            if let Some(badge) = achievement_store.unlock(key, persona) {
+                                let msg = AchievementStore::format_unlock(badge, persona);
+                                execute!(
+                                    io::stdout(),
+                                    SetForegroundColor(Color::Yellow),
+                                    Print(format!("  {msg}\n")),
+                                    ResetColor,
+                                )?;
+                            }
+                        }
+                    }
+                    turn_complete_fired = false;
+                }
+
                 if let Err(e) = result {
                     execute!(
                         io::stdout(),
@@ -1037,7 +1123,15 @@ fn truncate_display(s: &str, max: usize) -> String {
     if oneline.len() <= max {
         oneline
     } else {
-        format!("{}...", &oneline[..max])
+        // Find the last char boundary at or before `max` bytes.
+        // Direct byte slicing panics on multi-byte chars (emoji like 🟢 = 4 bytes).
+        let boundary = oneline
+            .char_indices()
+            .take_while(|(i, _)| *i <= max)
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        format!("{}[...]", &oneline[..boundary])
     }
 }
 

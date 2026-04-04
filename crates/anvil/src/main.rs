@@ -218,7 +218,9 @@ async fn main() -> Result<()> {
 
             // Apply launch profile if --profile was given
             if let Some(profile_name) = &cli.profile {
-                apply_launch_profile(&mut agent, &settings, profile_name)?;
+                // workspace was moved into Agent::new — retrieve it back via the agent
+                let ws = agent.workspace().to_path_buf();
+                apply_launch_profile(&mut agent, &settings, profile_name, &ws)?;
                 // Remember this profile for next time
                 let _ = anvil_config::save_last_profile(profile_name);
             }
@@ -341,6 +343,7 @@ fn apply_launch_profile(
     agent: &mut Agent,
     settings: &Settings,
     profile_name: &str,
+    workspace: &Path,
 ) -> Result<()> {
     let profile = settings
         .profiles
@@ -365,11 +368,25 @@ fn apply_launch_profile(
     // Apply model if specified
     if !profile.model.is_empty() {
         agent.set_model(profile.model.clone());
-        // Re-apply model profile sampling for the new model
-        let model_profiles = anvil_config::load_bundled_profiles();
-        if let Some(mp) = anvil_config::find_matching_profile(&model_profiles, &profile.model) {
+        // Check workspace model profiles first (user's custom .anvil/models/ files),
+        // then fall back to bundled profiles. Workspace profiles take priority so
+        // users can tune sampling for their specific hardware without touching
+        // bundled defaults.
+        let workspace_profiles = load_model_profiles(workspace);
+        let bundled_profiles = anvil_config::load_bundled_profiles();
+        let mp = anvil_config::find_matching_profile(&workspace_profiles, &profile.model)
+            .or_else(|| anvil_config::find_matching_profile(&bundled_profiles, &profile.model));
+        if let Some(mp) = mp {
             agent.apply_model_profile(mp);
         }
+    }
+
+    // Apply per-profile base_url if set — allows routing different profiles
+    // to different backend servers (e.g. kids on :8081, coding on :8080).
+    // Preserves the current backend kind; only the URL changes.
+    if !profile.base_url.is_empty() {
+        let kind = agent.backend().clone();
+        agent.set_backend(kind, profile.base_url.clone());
     }
 
     // Apply persona if specified

@@ -161,6 +161,8 @@ These prevent real bugs. Don't violate them.
 - **Workspace-scoped sockets**: Hash the workspace path into the socket filename. Multiple daemons can run concurrently in different projects without collision.
 - **Mtime ledger over inotify cookies**: Track agent writes by recording `(path, mtime)` after `file_write`/`file_edit`. The watcher checks mtime match — if it matches, it's our write. Simpler than trying to correlate inotify event IDs.
 - **Timeout over backpressure**: Wrap IPC writes in a 3-second timeout. A slow client should be shed, not allowed to block the agent dispatch loop.
+- **tool_choice=required for Action-First Personas**: Small models paired with `tool_choice: auto` will often choose to converse rather than execute tools, especially when asked complex requests. To ensure a persona like Bolt or Sparkle is "Action-First", we must dynamically enforce `tool_choice: required` at the agent level when those personas are active.
+- **Renderer UI Tech Debt**: Hiding JSON outputs (`stdout:`, `exit code 0`, tool schemas) is necessary for a friendly "Kids Mode", but embedding this domain logic inside `interactive.rs` heavily leaks concerns. This is a known technical debt item left for a future Plugin/Hook system refactor.
 
 ---
 
