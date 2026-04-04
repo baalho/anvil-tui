@@ -136,10 +136,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Init) => cmd_init(&workspace),
         Some(Commands::History { limit, search }) => cmd_history(limit, search),
-        Some(Commands::Watch {
-            ignore,
-            debounce,
-        }) => cmd_watch(&workspace, debounce, ignore).await,
+        Some(Commands::Watch { ignore, debounce }) => cmd_watch(&workspace, debounce, ignore).await,
         Some(Commands::Daemon { action }) => match action {
             DaemonAction::Start => cmd_daemon_start(&workspace).await,
             DaemonAction::Stop => client::daemon_stop(&workspace).await,
@@ -304,9 +301,7 @@ fn launch_zellij(workspace: &Path, layout_name: Option<&str>) -> Result<()> {
             }
         }
     } else {
-        anyhow::bail!(
-            "no .anvil/ directory found. Run `anvil init` first."
-        );
+        anyhow::bail!("no .anvil/ directory found. Run `anvil init` first.");
     };
 
     // Derive session name from layout filename (without .kdl extension)
@@ -394,7 +389,10 @@ fn apply_launch_profile(
         if let Some(persona) = anvil_agent::find_persona(&profile.persona) {
             agent.set_persona(Some(persona));
         } else {
-            eprintln!("  ⚠ profile '{}': unknown persona '{}'", profile.name, profile.persona);
+            eprintln!(
+                "  ⚠ profile '{}': unknown persona '{}'",
+                profile.name, profile.persona
+            );
         }
     }
 
@@ -403,7 +401,10 @@ fn apply_launch_profile(
         match profile.mode.to_lowercase().as_str() {
             "coding" | "code" => agent.set_mode(anvil_agent::Mode::Coding),
             "creative" | "create" => agent.set_mode(anvil_agent::Mode::Creative),
-            _ => eprintln!("  ⚠ profile '{}': unknown mode '{}'", profile.name, profile.mode),
+            _ => eprintln!(
+                "  ⚠ profile '{}': unknown mode '{}'",
+                profile.name, profile.mode
+            ),
         }
     }
 
@@ -411,10 +412,16 @@ fn apply_launch_profile(
     for skill_key in &profile.skills {
         let loader = anvil_agent::SkillLoader::new(agent.workspace());
         let skills: Vec<anvil_agent::Skill> = loader.scan();
-        if let Some(skill) = skills.into_iter().find(|s| s.key.eq_ignore_ascii_case(skill_key)) {
+        if let Some(skill) = skills
+            .into_iter()
+            .find(|s| s.key.eq_ignore_ascii_case(skill_key))
+        {
             agent.activate_skill(skill);
         } else {
-            eprintln!("  ⚠ profile '{}': unknown skill '{}'", profile.name, skill_key);
+            eprintln!(
+                "  ⚠ profile '{}': unknown skill '{}'",
+                profile.name, skill_key
+            );
         }
     }
 
@@ -834,11 +841,7 @@ async fn cmd_run_autonomous(
 /// Blocks the terminal until Ctrl+C. The file watcher runs in a background
 /// thread, debounces events, and sends them through the Event abstraction.
 /// In v2.0, this same watcher runs inside the daemon — the code is identical.
-async fn cmd_watch(
-    workspace: &Path,
-    debounce_secs: u64,
-    ignore: Vec<String>,
-) -> Result<()> {
+async fn cmd_watch(workspace: &Path, debounce_secs: u64, ignore: Vec<String>) -> Result<()> {
     use anvil_agent::{dispatch_event, DispatchResult, Event};
 
     let mut settings = load_settings(workspace)?;
@@ -868,10 +871,7 @@ async fn cmd_watch(
     agent.set_write_ledger(ledger.clone());
 
     eprintln!("╭─────────────────────────────────────╮");
-    eprintln!(
-        "│  ⚒  Anvil Watch v{:<19}│",
-        env!("CARGO_PKG_VERSION")
-    );
+    eprintln!("│  ⚒  Anvil Watch v{:<19}│", env!("CARGO_PKG_VERSION"));
     eprintln!("│  watching for file changes...        │");
     eprintln!("╰─────────────────────────────────────╯");
     eprintln!("  model:    {}", agent.model());
@@ -960,7 +960,7 @@ async fn cmd_watch(
                     }
                     AgentEvent::ToolResult { name, result } => {
                         let text = result.text();
-                        r.render_tool_result(&name, "✓", text.lines().count(), text.len());
+                        r.render_tool_result(&name, "✓", text);
                     }
                     AgentEvent::Error(msg) => r.render_error(&msg),
                     AgentEvent::TurnComplete => {
@@ -971,8 +971,7 @@ async fn cmd_watch(
             }
         });
 
-        let result =
-            dispatch_event(&mut agent, event, &agent_event_tx, perm_rx, cancel).await?;
+        let result = dispatch_event(&mut agent, event, &agent_event_tx, perm_rx, cancel).await?;
 
         // Drop the sender so the drain task finishes
         drop(agent_event_tx);

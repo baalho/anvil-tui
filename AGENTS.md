@@ -12,7 +12,7 @@ Single source of truth for AI agents working in this codebase.
 - **Repo**: https://github.com/baalho/anvil-tui
 - **License**: Apache-2.0
 - **Rust**: edition 2021, MSRV 1.75
-- **Version**: 2.1.0
+- **Version**: 2.2.0
 - **Platforms**: macOS, Linux, Windows/WSL
 - **Default model**: `qwen3-coder:30b` (Ollama)
 
@@ -161,8 +161,11 @@ These prevent real bugs. Don't violate them.
 - **Workspace-scoped sockets**: Hash the workspace path into the socket filename. Multiple daemons can run concurrently in different projects without collision.
 - **Mtime ledger over inotify cookies**: Track agent writes by recording `(path, mtime)` after `file_write`/`file_edit`. The watcher checks mtime match — if it matches, it's our write. Simpler than trying to correlate inotify event IDs.
 - **Timeout over backpressure**: Wrap IPC writes in a 3-second timeout. A slow client should be shed, not allowed to block the agent dispatch loop.
-- **tool_choice=required for Action-First Personas**: Small models paired with `tool_choice: auto` will often choose to converse rather than execute tools, especially when asked complex requests. To ensure a persona like Bolt or Sparkle is "Action-First", we must dynamically enforce `tool_choice: required` at the agent level when those personas are active.
-- **Renderer UI Tech Debt**: Hiding JSON outputs (`stdout:`, `exit code 0`, tool schemas) is necessary for a friendly "Kids Mode", but embedding this domain logic inside `interactive.rs` heavily leaks concerns. This is a known technical debt item left for a future Plugin/Hook system refactor.
+- **tool_choice=required for action-first personas**: Small models with `tool_choice: auto` often converse instead of executing tools. Kids personas force `tool_choice: required` via `Agent::is_kids_mode()`.
+- **KidsRenderer over inline conditionals**: Kids-specific rendering (fun messages, metadata stripping) belongs in a `KidsRenderer` that wraps `TerminalRenderer`, not in `if is_kids` branches scattered through `interactive.rs`. The interactive loop calls the `Renderer` trait uniformly.
+- **Per-profile base_url**: Different profiles can point to different backend servers. Kids on `:8081`, coding on `:8080`. `LaunchProfile.base_url` overrides `ProviderConfig.base_url`.
+- **Sandbox interpreters need file validation**: Allowing `python3` in the kids command allowlist isn't enough — `python3 -c "os.system('rm -rf /')"` bypasses it. Interpreters must run files within the sandbox workspace, not inline code.
+- **Zellij pane integration (future)**: Terminal output limitations (stack traces, multi-file diffs) would benefit from Zellij pane control — sending artifacts to split panes while keeping the chat loop clean. Not implemented; documented as a v3.0 direction.
 
 ---
 
@@ -230,14 +233,14 @@ Before any change:
 
 ## Test Inventory
 
-319 tests across all crates. Run with `cargo test`.
+340 tests across all crates. Run with `cargo test`.
 
 | Crate | Tests | Notes |
 |-------|-------|-------|
-| `anvil` (binary) | 32 | IPC, daemon, watcher, renderer, backend, commands |
+| `anvil` (binary) | 34 | IPC, daemon, watcher, renderer (incl. KidsRenderer), backend, commands |
 | `anvil-agent` | 136 | Agent loop, session store, events, dispatch, skills, personas, routing, memory, thinking. 3 env-dependent failures (devcontainer detection — pass on bare metal, fail inside containers) |
-| `anvil-tools` | 82 | 27 unit + 2 definition + 53 integration (tool execution) |
-| `anvil-config` | 37 | Settings, profiles, skills, layouts, inventory. 1 failure: `settings_without_profiles_parses` — `base_url` missing `#[serde(default)]` |
+| `anvil-tools` | 84 | 27 unit + 2 definition + 55 integration (tool execution, sandbox hardening) |
+| `anvil-config` | 54 | Settings, profiles (incl. per-profile base_url), skills, layouts, inventory |
 | `anvil-llm` | 22 | 14 unit + 8 integration (streaming) |
 | `anvil-mcp` | 10 | Client, types, JSON-RPC |
 
@@ -247,4 +250,3 @@ Before any change:
 2. MLX tool calling varies by model — `tool_choice` auto-stripped on 400/422
 3. GLM-4.7-Flash has chat template bugs on Ollama — use llama-server with `--jinja`
 4. 3 tests in `anvil-agent` fail inside devcontainers (`.dockerenv` detected before other signals) — pass on bare metal
-5. 1 test in `anvil-config` fails: `settings_without_profiles_parses` — `ProviderConfig.base_url` lacks `#[serde(default)]` so partial TOML without `base_url` fails to parse

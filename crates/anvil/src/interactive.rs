@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::commands::{self, CommandResult};
-use crate::render::{Renderer, TerminalRenderer};
+use crate::render::{self, Renderer};
 
 /// Tracks Ctrl+C state for double-press exit detection.
 struct CtrlCState {
@@ -46,7 +46,9 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         println!();
     }
 
-    let renderer = TerminalRenderer::new();
+    // Reassigned per-turn based on persona (kids vs standard).
+    #[allow(unused_assignments)]
+    let mut renderer: Box<dyn Renderer> = render::select_renderer(false);
     let stdin = io::stdin();
     let mut cumulative_usage = TokenUsage::default();
     let mut achievement_store = AchievementStore::load(agent.workspace());
@@ -133,15 +135,14 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
             .strip_suffix(":latest")
             .unwrap_or(agent.model());
         let persona = agent.persona();
-        let is_kids_persona = persona.as_ref().map_or(false, |p| anvil_agent::is_kids_persona(&p.key));
+        let is_kids = agent.is_kids_mode();
+        renderer = render::select_renderer(is_kids);
 
-        let status = if is_kids_persona {
-            String::new()
-        } else if let Some(ref persona) = persona {
-            format!("[{}|{}|{}]", persona.key, agent.mode(), model_short)
-        } else {
-            format!("[{}|{}]", agent.mode(), model_short)
-        };
+        let status = renderer.format_status(
+            &agent.mode().to_string(),
+            model_short,
+            persona.as_ref().map(|p| p.key.as_str()),
+        );
 
         // Show token usage in prompt when context is >50% full
         let context_window = agent.context_limit() as u64;
@@ -229,27 +230,26 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
             trimmed
         };
 
-        // Rate-limit user messages when a kids persona is active.
+        // Rate-limit user messages when kids mode is active.
         // Slash commands bypass the cooldown so /help always works.
-        if !trimmed.starts_with('/') {
-            if let Some(persona) = agent.persona() {
-                if anvil_agent::is_kids_persona(&persona.key) {
-                    if let Some(last) = last_message_time {
-                        const KIDS_INPUT_COOLDOWN_SECS: u64 = 2;
-                        let elapsed = last.elapsed();
-                        if elapsed.as_secs() < KIDS_INPUT_COOLDOWN_SECS {
-                            let persona_name = persona.name.clone();
-                            execute!(
-                                io::stdout(),
-                                SetForegroundColor(Color::Magenta),
-                                Print(format!(
-                                    "  ✨ {persona_name} is still thinking! Wait a moment...\n"
-                                )),
-                                ResetColor,
-                            )?;
-                            continue;
-                        }
-                    }
+        if !trimmed.starts_with('/') && is_kids {
+            if let Some(last) = last_message_time {
+                const KIDS_INPUT_COOLDOWN_SECS: u64 = 2;
+                let elapsed = last.elapsed();
+                if elapsed.as_secs() < KIDS_INPUT_COOLDOWN_SECS {
+                    let persona_name = agent
+                        .persona()
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| "Anvil".to_string());
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::Magenta),
+                        Print(format!(
+                            "  ✨ {persona_name} is still thinking! Wait a moment...\n"
+                        )),
+                        ResetColor,
+                    )?;
+                    continue;
                 }
             }
         }
@@ -413,16 +413,9 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         pending_triggers.extend(session_tracker.record_message());
 
         let prompt_owned = trimmed.to_string();
-        // Capture kids mode before taking the agent — kids auto-approve all tools
-        // because a 7-year-old can't understand "Allow file_write? [y/n/a]".
-        // Check both persona AND active skills — covers manual `/skill kids-game` too.
-        let is_kids_turn = agent
-            .persona()
-            .map(|p| anvil_agent::is_kids_persona(&p.key))
-            .unwrap_or(false)
-            || agent.has_active_skill("kids-first")
-            || agent.has_active_skill("kids-game")
-            || agent.has_active_skill("kids-story");
+        // Kids mode: auto-approve tools, use KidsRenderer.
+        // `is_kids` was computed above via agent.is_kids_mode().
+        let is_kids_turn = is_kids;
         let mut moved_agent = agent_slot.take().unwrap();
         let turn_cancel = cancel.clone();
         let turn_handle = tokio::spawn(async move {
@@ -523,27 +516,9 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         needs_newline = false;
                     }
 
-                    if is_kids_turn {
-                        // Kids see fun messages instead of JSON and file paths
-                        let msg = match name.as_str() {
-                            "file_write" => "  ✨ *writing some magic code...*\n",
-                            "file_edit" => "  ✨ *changing the magic...*\n",
-                            "shell" => "  🚀 *running it...*\n",
-                            _ => "", // hide other tools entirely
-                        };
-                        if !msg.is_empty() {
-                            let _ = crossterm::execute!(
-                                io::stdout(),
-                                crossterm::style::SetForegroundColor(crossterm::style::Color::Magenta),
-                                crossterm::style::Print(msg),
-                                crossterm::style::ResetColor,
-                            );
-                        }
-                    } else {
-                        let icon = tool_icon(&name);
-                        let short_args = truncate_display(&arguments, 80);
-                        renderer.render_tool_pending(&name, icon, &short_args);
-                    }
+                    let icon = tool_icon(&name);
+                    let short_args = truncate_display(&arguments, 80);
+                    renderer.render_tool_pending(&name, icon, &short_args);
 
                     // Track files created for session summary
                     if name == "file_write" {
@@ -570,48 +545,9 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                     // Track tool usage for session summary
                     *tool_use_counts.entry(name.clone()).or_insert(0) += 1;
 
-                    if is_kids_turn {
-                        // Kids see the actual program output — strip shell metadata
-                        if name == "shell" {
-                            let text = result.text();
-                            // Strip "exit code:", "stdout:", "stderr:" and "error: command timed out" prefixes
-                            let clean = text
-                                .lines()
-                                .map(|l| l.trim())
-                                .filter(|line| {
-                                    !line.starts_with("exit code:")
-                                        && !line.starts_with("stdout:")
-                                        && !line.starts_with("stderr:")
-                                        && !line.starts_with("error: command timed out")
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            if !clean.trim().is_empty() {
-                                let _ = crossterm::execute!(
-                                    io::stdout(),
-                                    crossterm::style::SetForegroundColor(crossterm::style::Color::Green),
-                                    crossterm::style::Print(format!("{}\n", clean.trim())),
-                                    crossterm::style::ResetColor,
-                                );
-                            }
-                            // Show kid-friendly timeout message
-                            if text.contains("timed out") {
-                                let _ = crossterm::execute!(
-                                    io::stdout(),
-                                    crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
-                                    crossterm::style::Print("  ⏰ *oops, that took too long! let me try again...*\n"),
-                                    crossterm::style::ResetColor,
-                                );
-                            }
-                        }
-                        // file_write/file_edit results are silently swallowed
-                    } else {
-                        let icon = tool_icon(&name);
-                        let text = result.text();
-                        let lines = text.lines().count();
-                        let chars = text.len();
-                        renderer.render_tool_result(&name, icon, lines, chars);
-                    }
+                    let icon = tool_icon(&name);
+                    let text = result.text();
+                    renderer.render_tool_result(&name, icon, text);
                 }
                 AgentEvent::Usage(u) => {
                     cumulative_usage.prompt_tokens += u.prompt_tokens;
@@ -737,7 +673,6 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                             }
                         }
                     }
-                    turn_complete_fired = false;
                 }
 
                 if let Err(e) = result {
@@ -760,18 +695,18 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         bp.stop();
     }
 
-    // Print session summary
-    let is_kids = agent_slot
+    // Print session summary — select renderer based on final persona state
+    let final_is_kids = agent_slot
         .as_ref()
-        .and_then(|a| a.persona())
-        .map(|p| anvil_agent::is_kids_persona(&p.key))
+        .map(|a| a.is_kids_mode())
         .unwrap_or(false);
+    let final_renderer = render::select_renderer(final_is_kids);
     print_session_summary(
         session_start.elapsed(),
         &cumulative_usage,
         &tool_use_counts,
         &files_created,
-        is_kids,
+        final_renderer.as_ref(),
     );
 
     if let Some(agent) = agent_slot {
@@ -1003,7 +938,7 @@ fn print_session_summary(
     usage: &TokenUsage,
     tool_counts: &std::collections::HashMap<String, u32>,
     files_created: &[String],
-    is_kids: bool,
+    renderer: &dyn Renderer,
 ) {
     let mins = duration.as_secs() / 60;
     let secs = duration.as_secs() % 60;
@@ -1027,11 +962,7 @@ fn print_session_summary(
     };
 
     println!();
-    if is_kids {
-        println!("╭─ ✨ What You Made! ✨ ──────────────╮");
-    } else {
-        println!("╭─ Session Summary ─────────────────────╮");
-    }
+    println!("{}", renderer.session_summary_header());
     println!("│  Duration: {:<28}│", duration_str);
     println!(
         "│  Tokens:   {:<28}│",
@@ -1059,19 +990,7 @@ fn print_session_summary(
         println!("│  Files:    {:<28}│", files_str);
     }
 
-    if is_kids {
-        let thing_count = files_created.len();
-        if thing_count > 0 {
-            println!(
-                "│                                       │"
-            );
-            println!(
-                "│  ✨ You made {} cool thing{}! ✨        │",
-                thing_count,
-                if thing_count == 1 { "" } else { "s" }
-            );
-        }
-    }
+    renderer.render_session_footer(files_created);
     println!("╰───────────────────────────────────────╯");
 }
 

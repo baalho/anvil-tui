@@ -40,9 +40,7 @@ enum DaemonTask {
         auto_approve: bool,
     },
     /// Query daemon status.
-    Status {
-        reply_tx: oneshot::Sender<Response>,
-    },
+    Status { reply_tx: oneshot::Sender<Response> },
     /// Graceful shutdown.
     Shutdown,
 }
@@ -91,10 +89,7 @@ pub async fn run_daemon(mut agent: Agent) -> Result<()> {
     let start_time = Instant::now();
 
     eprintln!("╭─────────────────────────────────────╮");
-    eprintln!(
-        "│  ⚒  Anvil Daemon v{:<17}│",
-        env!("CARGO_PKG_VERSION")
-    );
+    eprintln!("│  ⚒  Anvil Daemon v{:<17}│", env!("CARGO_PKG_VERSION"));
     eprintln!("│  listening for connections...        │");
     eprintln!("╰─────────────────────────────────────╯");
     eprintln!("  model:   {}", agent.model());
@@ -220,10 +215,7 @@ pub async fn run_daemon(mut agent: Agent) -> Result<()> {
         std::fs::remove_file(&pid_path)?;
     }
 
-    eprintln!(
-        "  daemon stopped. session: {}",
-        &agent.session_id()[..8]
-    );
+    eprintln!("  daemon stopped. session: {}", &agent.session_id()[..8]);
     Ok(())
 }
 
@@ -231,10 +223,7 @@ pub async fn run_daemon(mut agent: Agent) -> Result<()> {
 ///
 /// Reads one `Request`, enqueues the corresponding `DaemonTask`,
 /// and streams `Response` frames back to the client.
-async fn handle_connection(
-    stream: UnixStream,
-    task_tx: mpsc::Sender<DaemonTask>,
-) -> Result<()> {
+async fn handle_connection(stream: UnixStream, task_tx: mpsc::Sender<DaemonTask>) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let mut reader = tokio::io::BufReader::new(reader);
     let mut writer = tokio::io::BufWriter::new(writer);
@@ -298,11 +287,8 @@ async fn handle_connection(
                     | AgentEvent::ToolOutputDelta { .. } => continue,
                 };
 
-                match tokio::time::timeout(
-                    WRITE_TIMEOUT,
-                    ipc::write_frame(&mut writer, &response),
-                )
-                .await
+                match tokio::time::timeout(WRITE_TIMEOUT, ipc::write_frame(&mut writer, &response))
+                    .await
                 {
                     Ok(Ok(())) => {} // Frame sent successfully
                     Ok(Err(_)) => {
@@ -313,7 +299,10 @@ async fn handle_connection(
                     Err(_) => {
                         // Write timed out — client is slow or suspended.
                         // Drop the connection to free the dispatch loop.
-                        tracing::warn!("write timeout ({}s), shedding connection", WRITE_TIMEOUT.as_secs());
+                        tracing::warn!(
+                            "write timeout ({}s), shedding connection",
+                            WRITE_TIMEOUT.as_secs()
+                        );
                         break;
                     }
                 }
@@ -323,11 +312,7 @@ async fn handle_connection(
         Request::Status => {
             let (reply_tx, reply_rx) = oneshot::channel();
 
-            if task_tx
-                .send(DaemonTask::Status { reply_tx })
-                .await
-                .is_err()
-            {
+            if task_tx.send(DaemonTask::Status { reply_tx }).await.is_err() {
                 ipc::write_frame(
                     &mut writer,
                     &Response::Error {

@@ -258,12 +258,7 @@ impl LlmClient {
                     if let Some(obj) = fallback_body.as_object_mut() {
                         obj.remove("tool_choice");
                     }
-                    let resp = self
-                        .http
-                        .post(&url)
-                        .json(&fallback_body)
-                        .send()
-                        .await?;
+                    let resp = self.http.post(&url).json(&fallback_body).send().await?;
                     if !resp.status().is_success() {
                         let status = resp.status();
                         let body = resp.text().await.unwrap_or_default();

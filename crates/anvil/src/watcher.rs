@@ -14,9 +14,9 @@
 //! This exact code runs in the daemon's background. The only change is
 //! that `cmd_watch` becomes `daemon_watch` — the watcher logic is identical.
 
-use anyhow::{bail, Result};
 use anvil_agent::Event;
 use anvil_tools::WriteLedger;
+use anyhow::{bail, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -38,9 +38,9 @@ const ALWAYS_IGNORE: &[&str] = &[
 /// File extensions that are always ignored (editor artifacts).
 const NOISE_EXTENSIONS: &[&str] = &[
     "swp", "swo", "swn", // vim swap
-    "tmp", "bak",         // generic temp
-    "pyc", "pyo",         // python bytecode
-    "o", "a",             // compiled objects
+    "tmp", "bak", // generic temp
+    "pyc", "pyo", // python bytecode
+    "o", "a", // compiled objects
 ];
 
 /// Configuration for the file watcher.
@@ -58,10 +58,7 @@ pub struct WatchConfig {
 ///
 /// Blocks the current thread (runs in a `tokio::task::spawn_blocking` context).
 /// Returns when the event channel is closed or the watcher errors.
-pub fn run_file_watcher(
-    config: WatchConfig,
-    event_tx: mpsc::Sender<Event>,
-) -> Result<()> {
+pub fn run_file_watcher(config: WatchConfig, event_tx: mpsc::Sender<Event>) -> Result<()> {
     let (notify_tx, notify_rx) = std_mpsc::channel();
 
     let mut watcher = RecommendedWatcher::new(
@@ -179,10 +176,7 @@ mod tests {
 
     #[test]
     fn ignores_git_directory() {
-        assert!(!is_relevant(
-            Path::new("/project/.git/objects/abc123"),
-            &[]
-        ));
+        assert!(!is_relevant(Path::new("/project/.git/objects/abc123"), &[]));
     }
 
     #[test]
@@ -226,14 +220,8 @@ mod tests {
     #[test]
     fn user_ignore_patterns() {
         let ignores = vec!["vendor/".to_string(), "dist/".to_string()];
-        assert!(!is_relevant(
-            Path::new("/project/vendor/lib.go"),
-            &ignores
-        ));
-        assert!(!is_relevant(
-            Path::new("/project/dist/bundle.js"),
-            &ignores
-        ));
+        assert!(!is_relevant(Path::new("/project/vendor/lib.go"), &ignores));
+        assert!(!is_relevant(Path::new("/project/dist/bundle.js"), &ignores));
         assert!(is_relevant(Path::new("/project/src/app.go"), &ignores));
     }
 

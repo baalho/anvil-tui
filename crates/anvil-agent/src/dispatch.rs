@@ -138,10 +138,7 @@ mod tests {
 
     #[test]
     fn file_change_prompt_no_overflow_suffix() {
-        let paths = vec![
-            PathBuf::from("a.rs"),
-            PathBuf::from("b.rs"),
-        ];
+        let paths = vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")];
         let prompt = file_change_prompt(&paths);
         assert!(!prompt.contains("more files"));
     }

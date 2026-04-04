@@ -344,4 +344,3 @@ async fn turn_complete_event_emitted() {
     let has_complete = events.iter().any(|e| matches!(e, AgentEvent::TurnComplete));
     assert!(has_complete, "expected TurnComplete event");
 }
-

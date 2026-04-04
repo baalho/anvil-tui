@@ -10,8 +10,8 @@
 //! - **003**: `turn_messages` table — incremental `ChatMessage` JSON append
 //!   for exact crash recovery.
 
-use anyhow::Result;
 use anvil_llm::ChatMessage;
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -780,7 +780,7 @@ mod tests {
         let session = store.create_session().unwrap();
 
         for i in 0..5 {
-            let msg = ChatMessage::user(&format!("msg-{i}"));
+            let msg = ChatMessage::user(format!("msg-{i}"));
             store.append_turn_message(&session.id, i, &msg).unwrap();
         }
 
@@ -791,4 +791,3 @@ mod tests {
         }
     }
 }
-

@@ -243,7 +243,10 @@ mod tests {
         assert_eq!(settings.profiles[0].name, "sparkle");
         assert_eq!(settings.profiles[0].persona, "sparkle");
         assert_eq!(settings.profiles[0].mode, "creative");
-        assert_eq!(settings.profiles[0].skills, vec!["cool-stuff", "story-mode"]);
+        assert_eq!(
+            settings.profiles[0].skills,
+            vec!["cool-stuff", "story-mode"]
+        );
         assert_eq!(settings.profiles[1].name, "code");
         assert!(settings.profiles[1].persona.is_empty());
     }

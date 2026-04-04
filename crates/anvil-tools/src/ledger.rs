@@ -90,6 +90,7 @@ impl WriteLedger {
 
     /// Number of entries in the ledger (for diagnostics).
     #[cfg(test)]
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.inner.read().map(|l| l.len()).unwrap_or(0)
     }

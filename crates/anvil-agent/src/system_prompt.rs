@@ -181,7 +181,9 @@ fn detect_project(workspace: &Path) -> Vec<String> {
 
     // Language / framework detection
     if workspace.join("Cargo.toml").exists() {
-        info.push("Rust project. Build: cargo build. Test: cargo test. Lint: cargo clippy.".to_string());
+        info.push(
+            "Rust project. Build: cargo build. Test: cargo test. Lint: cargo clippy.".to_string(),
+        );
     }
     if workspace.join("package.json").exists() {
         // Detect package manager
@@ -570,9 +572,7 @@ mod tests {
             .find("LAYER4_CONTEXT_MARKER")
             .expect("context marker missing");
         // Layer 4c: project detection (semi-static)
-        let layer4c = prompt
-            .find("## Project")
-            .expect("project section missing");
+        let layer4c = prompt.find("## Project").expect("project section missing");
         // Layer 5a: environment (dynamic)
         let layer5a = prompt
             .find("## Environment")
@@ -624,8 +624,8 @@ mod tests {
         let result = detect_devcontainer(dir.path());
         // In a devcontainer env this might detect /.dockerenv, so we
         // only assert the devcontainer.json path isn't triggered
-        if result.is_some() {
-            assert_ne!(result.unwrap().indicator, "devcontainer.json");
+        if let Some(info) = result {
+            assert_ne!(info.indicator, "devcontainer.json");
         }
     }
 

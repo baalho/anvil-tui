@@ -1,7 +1,7 @@
 # Anvil Manual
 
 A local-first coding agent forged in Rust. Runs offline, connects to
-Ollama, llama-server, or MLX. Version 2.1.
+Ollama, llama-server, or MLX. Version 2.2.
 
 ---
 
@@ -504,9 +504,14 @@ skills = ["containers", "deploy"]
 [[profiles]]
 name = "sparkle"
 persona = "sparkle"
-mode = "creative"
+mode = "coding"
 skills = ["kids-first"]
+base_url = "http://localhost:8081/v1"  # optional: route to a different backend
 ```
+
+Each profile can override `base_url` to point to a different backend server.
+This enables multi-backend setups — e.g., kids on a smaller model at `:8081`,
+coding on a larger model at `:8080`.
 
 ```bash
 anvil -p tq          # TurboQuant coding setup
@@ -717,6 +722,46 @@ anvil run -p "optimize the build" -a --verify "cargo build" --max-minutes 15
 | `/inventory` | Show host/service inventory |
 | `/history` | List recent sessions |
 | `/end` | End session and exit |
+
+---
+
+## Kids Mode
+
+Kids personas (Sparkle, Bolt, Codebeard) are designed for children aged
+5-10. When a kids persona or kids-* skill is active:
+
+- **Coding mode** — kids need `file_write` and `shell` to build things.
+  All personas now default to Coding mode (v2.2 change).
+- **tool_choice: required** — forces the model to use tools rather than
+  just chatting. Small models with `tool_choice: auto` tend to converse
+  instead of executing.
+- **Auto-approve** — permission prompts are skipped. A 7-year-old can't
+  understand "Allow file_write? [y/n/a]".
+- **KidsRenderer** — tool calls show fun messages ("✨ writing some magic
+  code...") instead of JSON schemas. Shell metadata (exit codes, stdout
+  prefixes) is stripped. File write results are silently swallowed.
+- **Input cooldown** — 2-second rate limit prevents prompt spamming.
+- **Shell sandbox** — commands restricted to an allowlist (echo, python3,
+  cargo, node, etc.). Interpreters can only run files within the sandbox
+  workspace, not inline code (`-c`/`-e` flags are blocked).
+
+### Setup
+
+```toml
+# config.toml
+[agent]
+kids_workspace = "~/kids-projects"
+
+[[profiles]]
+name = "sparkle"
+persona = "sparkle"
+mode = "coding"
+skills = ["kids-first"]
+```
+
+```bash
+anvil -p sparkle
+```
 
 ---
 

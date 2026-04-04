@@ -104,7 +104,10 @@ pub fn inventory_as_prompt(inventory: &Inventory) -> Option<String> {
         out.push_str("\n### Deployments\n\n");
         for h in &inventory.hosts {
             for d in &h.deployments {
-                out.push_str(&format!("- **{}** on {} ({})\n", d.name, h.name, h.container_runtime));
+                out.push_str(&format!(
+                    "- **{}** on {} ({})\n",
+                    d.name, h.name, h.container_runtime
+                ));
                 if let Some(port) = d.port {
                     out.push_str(&format!("  - Port: {port}\n"));
                 }

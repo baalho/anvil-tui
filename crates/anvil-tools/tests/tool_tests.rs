@@ -839,3 +839,78 @@ async fn kids_sandbox_cleared_allows_all() {
         .await;
     assert!(result.is_ok());
 }
+
+#[tokio::test]
+async fn kids_sandbox_blocks_inline_code_execution() {
+    let (_dir, executor) = setup();
+    executor.set_kids_sandbox(anvil_tools::KidsSandbox {
+        workspace: _dir.path().to_path_buf(),
+        allowed_commands: vec![
+            "echo".to_string(),
+            "python3".to_string(),
+            "node".to_string(),
+        ],
+    });
+
+    // python3 -c is blocked (inline code execution)
+    let result = executor
+        .execute("shell", &json!({"command": "python3 -c 'import os'"}))
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("no inline code"), "got: {err}");
+
+    // node -e is blocked
+    let result = executor
+        .execute("shell", &json!({"command": "node -e 'process.exit(0)'"}))
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("no inline code"), "got: {err}");
+
+    // echo is not an interpreter — -c flag is fine
+    let result = executor
+        .execute("shell", &json!({"command": "echo -c hello"}))
+        .await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn kids_sandbox_blocks_scripts_outside_workspace() {
+    let dir = TempDir::new().unwrap();
+    let kids_dir = dir.path().join("kids-projects");
+    fs::create_dir_all(&kids_dir).unwrap();
+    fs::write(kids_dir.join("game.py"), "print('hello')").unwrap();
+
+    // Create a script outside the sandbox
+    fs::write(dir.path().join("evil.py"), "import os").unwrap();
+
+    let executor = ToolExecutor::new(dir.path().to_path_buf(), 10, 10_000);
+    executor.set_kids_sandbox(anvil_tools::KidsSandbox {
+        workspace: kids_dir.clone(),
+        allowed_commands: vec!["python3".to_string()],
+    });
+
+    // Script inside workspace — sandbox check passes (command may fail if no python3)
+    let result = executor
+        .execute("shell", &json!({"command": "python3 game.py"}))
+        .await;
+    if let Err(ref e) = result {
+        assert!(
+            !e.to_string().contains("project folder"),
+            "sandbox wrongly blocked: {e}"
+        );
+    }
+
+    // Script outside workspace is blocked
+    let outside_path = dir.path().join("evil.py");
+    let result = executor
+        .execute(
+            "shell",
+            &json!({"command": format!("python3 {}", outside_path.display())}),
+        )
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("project folder"), "got: {err}");
+}

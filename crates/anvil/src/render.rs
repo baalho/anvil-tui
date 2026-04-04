@@ -1,16 +1,10 @@
 //! Output rendering pipeline — abstracts how agent output reaches the user.
 //!
-//! # Why this exists
-//! All agent output currently goes through `println!` and crossterm in
-//! `interactive.rs`. This works for text but has no path for images, SVG,
-//! tables, or other rich content. The `Renderer` trait provides a seam:
-//! - v1.5: `TerminalRenderer` — extracts current inline rendering
-//! - Future: `ImageRenderer` (Kitty/iTerm2/Sixel), `WebRenderer`, etc.
-//!
-//! # How it works
-//! The interactive loop calls `Renderer` methods instead of writing directly
-//! to stdout. Each renderer implementation decides how to display content
-//! based on the output type and terminal capabilities.
+//! The `Renderer` trait decouples the interactive loop from display logic.
+//! `TerminalRenderer` handles standard output. `KidsRenderer` wraps it to
+//! show fun messages instead of JSON schemas and shell metadata — the
+//! interactive loop calls the renderer uniformly without knowing which
+//! persona is active.
 
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use std::io::{self, Write};
@@ -33,8 +27,8 @@ pub trait Renderer {
     /// Render a tool call that's about to execute.
     fn render_tool_pending(&self, tool_name: &str, icon: &str, args_preview: &str);
 
-    /// Render a tool execution result.
-    fn render_tool_result(&self, tool_name: &str, icon: &str, lines: usize, chars: usize);
+    /// Render a tool execution result with the raw output text.
+    fn render_tool_result(&self, tool_name: &str, icon: &str, result_text: &str);
 
     /// Render a command result (slash command output).
     fn render_command_result(&self, text: &str);
@@ -44,14 +38,23 @@ pub trait Renderer {
 
     /// Render a status/info message (non-content, e.g., "retrying...").
     fn render_info(&self, message: &str);
+
+    /// Format the status line shown in the readline prompt.
+    /// Returns empty string to hide the status line entirely.
+    fn format_status(&self, mode: &str, model: &str, persona: Option<&str>) -> String;
+
+    /// Format the session summary header.
+    fn session_summary_header(&self) -> &str;
+
+    /// Render optional session summary footer (e.g., kids "cool things" count).
+    fn render_session_footer(&self, _files_created: &[String]) {}
 }
 
 /// Terminal renderer — renders agent output inline using crossterm.
 ///
-/// This is the default renderer. It handles text content via direct stdout
-/// writes and uses ANSI colors for tool results, errors, and status messages.
-/// Future content types (images, SVG) will need a different renderer or
-/// terminal protocol support (Kitty, iTerm2, Sixel).
+/// This is the default renderer for standard interactive mode. Uses ANSI
+/// colors for tool results, errors, and status messages.
+#[derive(Default)]
 pub struct TerminalRenderer;
 
 impl TerminalRenderer {
@@ -67,7 +70,6 @@ impl Renderer for TerminalRenderer {
     }
 
     fn render_thinking_delta(&self, text: &str) {
-        // Prefix each newline with box-drawing continuation
         let prefixed = text.replace('\n', "\n  │ ");
         let _ = crossterm::execute!(
             io::stdout(),
@@ -107,11 +109,15 @@ impl Renderer for TerminalRenderer {
         );
     }
 
-    fn render_tool_result(&self, tool_name: &str, icon: &str, lines: usize, chars: usize) {
+    fn render_tool_result(&self, tool_name: &str, icon: &str, result_text: &str) {
+        let lines = result_text.lines().count();
+        let chars = result_text.len();
         let _ = crossterm::execute!(
             io::stdout(),
             SetForegroundColor(Color::DarkGrey),
-            Print(format!("  {icon} {tool_name}: {lines} lines, {chars} chars\n")),
+            Print(format!(
+                "  {icon} {tool_name}: {lines} lines, {chars} chars\n"
+            )),
             ResetColor,
         );
     }
@@ -137,17 +143,157 @@ impl Renderer for TerminalRenderer {
             ResetColor,
         );
     }
+
+    fn format_status(&self, mode: &str, model: &str, persona: Option<&str>) -> String {
+        if let Some(persona) = persona {
+            format!("[{}|{}|{}]", persona, mode, model)
+        } else {
+            format!("[{}|{}]", mode, model)
+        }
+    }
+
+    fn session_summary_header(&self) -> &str {
+        "╭─ Session Summary ─────────────────────╮"
+    }
 }
 
-/// Truncate a string for display, adding "..." if truncated.
-fn truncate_for_display(s: &str, max: usize) -> String {
-    let first_line = s.lines().next().unwrap_or(s);
-    if first_line.len() > max {
-        format!("{}...", &first_line[..max])
-    } else if s.lines().count() > 1 {
-        format!("{first_line}...")
+/// Kids renderer — wraps `TerminalRenderer` with child-friendly output.
+///
+/// Replaces tool schemas and shell metadata with fun messages. Hides
+/// technical details (exit codes, file paths, JSON) that would confuse
+/// a 7-year-old. The interactive loop doesn't know this renderer exists —
+/// it calls the same `Renderer` trait methods uniformly.
+pub struct KidsRenderer {
+    inner: TerminalRenderer,
+}
+
+impl Default for KidsRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KidsRenderer {
+    pub fn new() -> Self {
+        Self {
+            inner: TerminalRenderer::new(),
+        }
+    }
+}
+
+impl Renderer for KidsRenderer {
+    fn render_content_delta(&self, text: &str) {
+        self.inner.render_content_delta(text);
+    }
+
+    fn render_thinking_delta(&self, text: &str) {
+        self.inner.render_thinking_delta(text);
+    }
+
+    fn render_thinking_start(&self) {
+        self.inner.render_thinking_start();
+    }
+
+    fn render_thinking_end(&self) {
+        self.inner.render_thinking_end();
+    }
+
+    fn render_tool_pending(&self, tool_name: &str, _icon: &str, _args_preview: &str) {
+        let msg = match tool_name {
+            "file_write" => "  ✨ *writing some magic code...*\n",
+            "file_edit" => "  ✨ *changing the magic...*\n",
+            "shell" => "  🚀 *running it...*\n",
+            _ => return, // hide other tools entirely
+        };
+        let _ = crossterm::execute!(
+            io::stdout(),
+            SetForegroundColor(Color::Magenta),
+            Print(msg),
+            ResetColor,
+        );
+    }
+
+    fn render_tool_result(&self, tool_name: &str, _icon: &str, result_text: &str) {
+        if tool_name == "shell" {
+            // Strip shell metadata — kids see only program output
+            let clean: String = result_text
+                .lines()
+                .map(|l| l.trim())
+                .filter(|line| {
+                    !line.starts_with("exit code:")
+                        && !line.starts_with("stdout:")
+                        && !line.starts_with("stderr:")
+                        && !line.starts_with("error: command timed out")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !clean.trim().is_empty() {
+                let _ = crossterm::execute!(
+                    io::stdout(),
+                    SetForegroundColor(Color::Green),
+                    Print(format!("{}\n", clean.trim())),
+                    ResetColor,
+                );
+            }
+            if result_text.contains("timed out") {
+                let _ = crossterm::execute!(
+                    io::stdout(),
+                    SetForegroundColor(Color::Yellow),
+                    Print("  ⏰ *oops, that took too long! let me try again...*\n"),
+                    ResetColor,
+                );
+            }
+        }
+        // file_write/file_edit results are silently swallowed
+    }
+
+    fn render_command_result(&self, text: &str) {
+        self.inner.render_command_result(text);
+    }
+
+    fn render_error(&self, message: &str) {
+        // Show kid-friendly error instead of raw message
+        let _ = crossterm::execute!(
+            io::stdout(),
+            SetForegroundColor(Color::Yellow),
+            Print("  🤔 *hmm, something went wonky! let me try again...*\n"),
+            ResetColor,
+        );
+        let _ = message; // suppress unused warning
+    }
+
+    fn render_info(&self, message: &str) {
+        self.inner.render_info(message);
+    }
+
+    fn format_status(&self, _mode: &str, _model: &str, _persona: Option<&str>) -> String {
+        // Kids don't need to see [coding|qwen3-coder:30b]
+        String::new()
+    }
+
+    fn session_summary_header(&self) -> &str {
+        "╭─ ✨ What You Made! ✨ ──────────────╮"
+    }
+
+    fn render_session_footer(&self, files_created: &[String]) {
+        let count = files_created.len();
+        if count > 0 {
+            println!("│                                       │");
+            println!(
+                "│  ✨ You made {} cool thing{}! ✨        │",
+                count,
+                if count == 1 { "" } else { "s" }
+            );
+        }
+    }
+}
+
+/// Create the appropriate renderer based on whether kids mode is active.
+pub fn select_renderer(is_kids: bool) -> Box<dyn Renderer> {
+    if is_kids {
+        Box::new(KidsRenderer::new())
     } else {
-        first_line.to_string()
+        Box::new(TerminalRenderer::new())
     }
 }
 
@@ -156,22 +302,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn truncate_short_string_unchanged() {
-        assert_eq!(truncate_for_display("hello", 100), "hello");
+    fn terminal_renderer_format_status_with_persona() {
+        let r = TerminalRenderer::new();
+        assert_eq!(
+            r.format_status("coding", "qwen3", Some("sparkle")),
+            "[sparkle|coding|qwen3]"
+        );
     }
 
     #[test]
-    fn truncate_long_string_adds_ellipsis() {
-        let long = "a".repeat(300);
-        let result = truncate_for_display(&long, 200);
-        assert!(result.ends_with("..."));
-        assert_eq!(result.len(), 203); // 200 + "..."
+    fn terminal_renderer_format_status_without_persona() {
+        let r = TerminalRenderer::new();
+        assert_eq!(r.format_status("coding", "qwen3", None), "[coding|qwen3]");
     }
 
     #[test]
-    fn truncate_multiline_takes_first_line() {
-        let multi = "first line\nsecond line\nthird line";
-        let result = truncate_for_display(multi, 200);
-        assert_eq!(result, "first line...");
+    fn kids_renderer_hides_status() {
+        let r = KidsRenderer::new();
+        assert_eq!(r.format_status("coding", "qwen3", Some("sparkle")), "");
+    }
+
+    #[test]
+    fn kids_renderer_session_header() {
+        let r = KidsRenderer::new();
+        assert!(r.session_summary_header().contains("What You Made"));
+    }
+
+    #[test]
+    fn select_renderer_returns_correct_type() {
+        let normal = select_renderer(false);
+        assert_eq!(
+            normal.format_status("coding", "qwen3", None),
+            "[coding|qwen3]"
+        );
+
+        let kids = select_renderer(true);
+        assert_eq!(kids.format_status("coding", "qwen3", Some("sparkle")), "");
     }
 }

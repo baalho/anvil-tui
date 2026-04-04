@@ -585,11 +585,7 @@ async fn model_command(agent: &mut Agent, arg: &str) -> String {
                         if p.capabilities.strengths.is_empty() {
                             format!("  ({})", p.name)
                         } else {
-                            format!(
-                                "  ({} — {})",
-                                p.name,
-                                p.capabilities.strengths.join(", ")
-                            )
+                            format!("  ({} — {})", p.name, p.capabilities.strengths.join(", "))
                         }
                     } else {
                         String::new()
@@ -1114,7 +1110,9 @@ fn selftest_command(agent: &Agent) -> String {
             passed += 1;
         }
         Ok(content) => {
-            results.push(format!("  ❌ file_read — expected 'hello world', got '{content}'"));
+            results.push(format!(
+                "  ❌ file_read — expected 'hello world', got '{content}'"
+            ));
             failed += 1;
         }
         Err(e) => {
@@ -1132,7 +1130,9 @@ fn selftest_command(agent: &Agent) -> String {
                     Ok(()) => {
                         let verify = std::fs::read_to_string(&test_file).unwrap_or_default();
                         if verify.contains("goodbye") {
-                            results.push("  ✅ file_edit — replaced 'hello' with 'goodbye'".to_string());
+                            results.push(
+                                "  ✅ file_edit — replaced 'hello' with 'goodbye'".to_string(),
+                            );
                             passed += 1;
                         } else {
                             results.push("  ❌ file_edit — replacement not found".to_string());
@@ -1274,7 +1274,11 @@ fn selftest_command(agent: &Agent) -> String {
 
     let elapsed = start.elapsed();
     let total = passed + failed;
-    let status = if failed == 0 { "all passed" } else { "FAILURES" };
+    let status = if failed == 0 {
+        "all passed"
+    } else {
+        "FAILURES"
+    };
 
     let mut output = String::new();
     for r in &results {

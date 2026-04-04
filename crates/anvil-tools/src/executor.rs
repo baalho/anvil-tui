@@ -1,4 +1,5 @@
-//! Tool executor — dispatches tool calls to implementations and manages env passthrough.
+//! Tool executor — dispatches tool calls, manages env passthrough, and enforces
+//! the kids sandbox (command allowlist + interpreter file validation).
 //!
 //! # How env passthrough works
 //! The shell tool uses `env_clear()` for security, only passing safe vars (PATH, HOME, etc.).
@@ -13,8 +14,8 @@ use crate::tools;
 use crate::truncation::{self, TruncationConfig};
 use anyhow::{bail, Result};
 use serde_json::Value;
-use std::path::Path;
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -121,10 +122,16 @@ impl ToolExecutor {
 
     /// Check if a shell command is allowed under the current sandbox.
     /// Returns Ok(()) if allowed, Err with friendly message if blocked.
+    ///
+    /// Two layers of validation:
+    /// 1. Command allowlist — only permitted binaries can run.
+    /// 2. Script interpreters (python3, python, node) must reference a file
+    ///    within the sandbox workspace — no `-c`/`-e` inline code execution.
     fn check_shell_allowlist(&self, command: &str) -> Result<()> {
         let sandbox = self.kids_sandbox.lock().unwrap();
         if let Some(sandbox) = sandbox.as_ref() {
-            let first_word = command.split_whitespace().next().unwrap_or("");
+            let words: Vec<&str> = command.split_whitespace().collect();
+            let first_word = words.first().copied().unwrap_or("");
             // Strip path prefix (e.g., /usr/bin/python3 -> python3)
             let binary = first_word.rsplit('/').next().unwrap_or(first_word);
             if !sandbox.allowed_commands.iter().any(|c| c == binary) {
@@ -132,6 +139,42 @@ impl ToolExecutor {
                     "✨ That command isn't available in kids mode! Try one of: {}",
                     sandbox.allowed_commands.join(", ")
                 );
+            }
+
+            // Script interpreters must run files, not inline code.
+            const INTERPRETERS: &[&str] = &["python3", "python", "node"];
+            if INTERPRETERS.contains(&binary) {
+                // Block -c / -e flags (inline code execution)
+                for arg in &words[1..] {
+                    if *arg == "-c"
+                        || *arg == "-e"
+                        || arg.starts_with("-c")
+                        || arg.starts_with("-e")
+                    {
+                        bail!(
+                            "✨ In kids mode, {} can only run script files — no inline code!",
+                            binary
+                        );
+                    }
+                }
+                // If there's a file argument, verify it's within the sandbox workspace
+                if let Some(file_arg) = words.get(1) {
+                    if !file_arg.starts_with('-') {
+                        let file_path = if std::path::Path::new(file_arg).is_absolute() {
+                            std::path::PathBuf::from(file_arg)
+                        } else {
+                            sandbox.workspace.join(file_arg)
+                        };
+                        let canonical_ws = sandbox
+                            .workspace
+                            .canonicalize()
+                            .unwrap_or_else(|_| sandbox.workspace.clone());
+                        let canonical_file = file_path.canonicalize().unwrap_or(file_path);
+                        if !canonical_file.starts_with(&canonical_ws) {
+                            bail!("✨ In kids mode, scripts must be in your project folder!");
+                        }
+                    }
+                }
             }
         }
         Ok(())

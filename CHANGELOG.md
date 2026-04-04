@@ -5,6 +5,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [v2.2.0] — 2025-07-25 — Kids Mode Overhaul
+
+### Added
+- **Per-profile base_url** — `LaunchProfile` gains `base_url` field for
+  multi-backend setups (kids on `:8081`, coding on `:8080`).
+- **Workspace model profiles** — `.anvil/models/` profiles are checked
+  before bundled profiles, allowing per-project model configuration.
+- **KidsRenderer** — dedicated renderer wrapping `TerminalRenderer` with
+  fun messages, metadata stripping, and silent file result swallowing.
+  Replaces inline `if is_kids` branches in `interactive.rs`.
+- **Agent::is_kids_mode()** — single method for kids state detection,
+  replacing scattered persona/skill checks.
+- **Sandbox interpreter validation** — `python3`/`node` commands must
+  reference files within the sandbox workspace. Inline code (`-c`/`-e`)
+  is blocked.
+- **Kids Mode section** in MANUAL.md.
+
+### Changed
+- All personas default to **Coding mode** (kids need `file_write` + `shell`).
+- Kids personas/skills force `tool_choice: required` (action-first).
+- Kids tool calls are auto-approved (no permission prompts).
+- `render_tool_result` signature changed: accepts raw text instead of
+  line/char counts, enabling renderer-specific output formatting.
+- Default kids workspace falls back to `$TMPDIR/anvil-kids-$PID` when
+  `kids_workspace` is not configured.
+
+### Fixed
+- `#[serde(default)]` on `ProviderConfig.base_url` and `.model` — fixes
+  `settings_without_profiles_parses` test failure.
+- Achievement processing deferred past agent take/put cycle (crash fix).
+- `truncate_display` char boundary fix (emoji panic prevention).
+
+### Removed
+- `V2.2_ARCHITECTURE_REVIEW.md` — content folded into AGENTS.md.
+- Stale branches: `feat/v1.2.0-infra-ux`, `spec/full-roadmap-v1`.
+
 ## [v2.1.0] — 2025-07-17 — The Stability Update
 
 ### Fixed

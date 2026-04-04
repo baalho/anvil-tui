@@ -796,8 +796,14 @@ mod tests {
         "#;
         let profile: ModelProfile = toml::from_str(toml_str).unwrap();
         assert_eq!(profile.capabilities.strengths.len(), 3);
-        assert!(profile.capabilities.strengths.contains(&"coding".to_string()));
-        assert!(profile.capabilities.strengths.contains(&"creative".to_string()));
+        assert!(profile
+            .capabilities
+            .strengths
+            .contains(&"coding".to_string()));
+        assert!(profile
+            .capabilities
+            .strengths
+            .contains(&"creative".to_string()));
     }
 
     #[test]
@@ -820,7 +826,10 @@ mod tests {
         assert_eq!(kv.type_k, "q8_0");
         assert_eq!(kv.type_v, "turbo4");
         assert_eq!(kv.recommended_context, 262144);
-        assert!(tq4.capabilities.strengths.contains(&"long-context".to_string()));
+        assert!(tq4
+            .capabilities
+            .strengths
+            .contains(&"long-context".to_string()));
     }
 
     #[test]

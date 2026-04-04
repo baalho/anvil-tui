@@ -539,6 +539,17 @@ impl Agent {
         self.active_skills.iter().any(|s| s.key == key)
     }
 
+    /// Whether the agent is in kids mode — either a kids persona is active
+    /// or a kids-* skill is manually loaded. Controls tool_choice, auto-approve,
+    /// and renderer selection.
+    pub fn is_kids_mode(&self) -> bool {
+        self.persona()
+            .is_some_and(|p| crate::persona::is_kids_persona(&p.key))
+            || self.has_active_skill("kids-first")
+            || self.has_active_skill("kids-game")
+            || self.has_active_skill("kids-story")
+    }
+
     /// Get the list of extra env vars currently passed through to shell commands.
     pub fn extra_env(&self) -> &[String] {
         self.executor.extra_env()
@@ -617,15 +628,16 @@ impl Agent {
     }
 
     /// Activate a character persona. Rebuilds the system prompt with persona instructions.
-    /// When a kids persona is activated and `kids_workspace` is configured,
-    /// the executor's sandbox is engaged — restricting file paths and shell commands.
+    /// When a kids persona is activated, the executor's sandbox is engaged —
+    /// restricting file paths and shell commands. If no `kids_workspace` is
+    /// configured, defaults to a temp directory.
     pub fn set_persona(&mut self, persona: Option<crate::persona::Persona>) {
         // Update sandbox based on persona
         if let Some(ref p) = persona {
             if crate::persona::is_kids_persona(&p.key) {
-                if let Some(ref kids_ws) = self.settings.agent.kids_workspace {
+                let ws_path = if let Some(ref kids_ws) = self.settings.agent.kids_workspace {
                     // Manual tilde expansion (no shellexpand dependency)
-                    let expanded = if let Some(rest) = kids_ws.strip_prefix("~/") {
+                    if let Some(rest) = kids_ws.strip_prefix("~/") {
                         if let Some(home) = std::env::var_os("HOME") {
                             std::path::PathBuf::from(home).join(rest)
                         } else {
@@ -633,26 +645,28 @@ impl Agent {
                         }
                     } else {
                         std::path::PathBuf::from(kids_ws)
-                    };
-                    let ws_path = expanded;
-                    // Create the directory if it doesn't exist
-                    let _ = std::fs::create_dir_all(&ws_path);
-                    let allowed = self
-                        .settings
-                        .agent
-                        .kids_allowed_commands
-                        .clone()
-                        .unwrap_or_else(|| {
-                            anvil_tools::DEFAULT_KIDS_COMMANDS
-                                .iter()
-                                .map(|s| s.to_string())
-                                .collect()
-                        });
-                    self.executor.set_kids_sandbox(anvil_tools::KidsSandbox {
-                        workspace: ws_path,
-                        allowed_commands: allowed,
+                    }
+                } else {
+                    // Default to a temp directory when no kids_workspace is configured
+                    std::env::temp_dir().join(format!("anvil-kids-{}", std::process::id()))
+                };
+                // Create the directory if it doesn't exist
+                let _ = std::fs::create_dir_all(&ws_path);
+                let allowed = self
+                    .settings
+                    .agent
+                    .kids_allowed_commands
+                    .clone()
+                    .unwrap_or_else(|| {
+                        anvil_tools::DEFAULT_KIDS_COMMANDS
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect()
                     });
-                }
+                self.executor.set_kids_sandbox(anvil_tools::KidsSandbox {
+                    workspace: ws_path,
+                    allowed_commands: allowed,
+                });
             } else {
                 self.executor.clear_kids_sandbox();
             }
@@ -802,15 +816,8 @@ impl Agent {
                 }
             }
 
-            // Build tools and tool_choice based on active mode.
-            // Creative mode omits tools entirely so the model responds directly.
-            // Coding mode sends all tools with tool_choice: "auto".
-            // Kids personas/skills force tool_choice: "required" to ensure ACTION-FIRST behavior.
-            let is_kids_mode = self.persona().map_or(false, |p| crate::persona::is_kids_persona(&p.key))
-                || self.has_active_skill("kids-first")
-                || self.has_active_skill("kids-game")
-                || self.has_active_skill("kids-story");
-
+            // Build tools and tool_choice based on mode and kids state.
+            // Creative: no tools. Coding: auto. Kids: required (action-first).
             let (tools, tool_choice) = match self.mode {
                 Mode::Creative => (None, Some(anvil_llm::ToolChoice::none())),
                 Mode::Coding => {
@@ -819,7 +826,7 @@ impl Agent {
                     tool_defs.extend(mcp_defs);
                     let tools_json: Vec<anvil_llm::ToolDefinition> =
                         serde_json::from_value(serde_json::Value::Array(tool_defs))?;
-                    let choice = if is_kids_mode {
+                    let choice = if self.is_kids_mode() {
                         anvil_llm::ToolChoice::required()
                     } else {
                         anvil_llm::ToolChoice::auto()
