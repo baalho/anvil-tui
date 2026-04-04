@@ -74,7 +74,19 @@ tokens, wall-clock time.
 Use small models for grep/ls, large models for code generation.
 
 **Renderer** (`render.rs`): Trait for output rendering. `TerminalRenderer`
-handles text. Future renderers add image display (Kitty/Sixel), web UI, etc.
+handles standard output. `KidsRenderer` wraps it with child-friendly
+messages (hides JSON, exit codes, file paths). `select_renderer()` picks
+the implementation based on kids mode. Future renderers add image display
+(Kitty/Sixel), web UI, etc.
+
+**TurnPolicy** (`interactive.rs`): Per-turn behavioral decisions derived
+from `Agent::is_kids_mode()`. Captures auto-approve, rate limiting, and
+renderer selection in one struct instead of scattered `if is_kids` checks.
+
+**KidsSandbox** (`executor.rs`): Restricts workspace path and shell
+commands when kids mode is active. Two-layer validation: command allowlist
++ interpreter file validation (blocks `-c`/`-e` inline code, verifies
+script paths are within the sandbox workspace).
 
 **Launch Profiles** (`settings.rs`): `[[profiles]]` in config.toml bundle
 persona + mode + skills + model into `anvil --profile <name>`. Last-used
@@ -165,6 +177,7 @@ These prevent real bugs. Don't violate them.
 - **KidsRenderer over inline conditionals**: Kids-specific rendering (fun messages, metadata stripping) belongs in a `KidsRenderer` that wraps `TerminalRenderer`, not in `if is_kids` branches scattered through `interactive.rs`. The interactive loop calls the `Renderer` trait uniformly.
 - **Per-profile base_url**: Different profiles can point to different backend servers. Kids on `:8081`, coding on `:8080`. `LaunchProfile.base_url` overrides `ProviderConfig.base_url`.
 - **Sandbox interpreters need file validation**: Allowing `python3` in the kids command allowlist isn't enough — `python3 -c "os.system('rm -rf /')"` bypasses it. Interpreters must run files within the sandbox workspace, not inline code.
+- **TurnPolicy over scattered booleans**: Per-turn behavioral decisions (auto-approve, rate limiting, renderer) belong in a `TurnPolicy` struct derived once from `Agent::is_kids_mode()`, not in `if is_kids` checks scattered through the loop. Adding a new policy dimension is one field, not a grep-and-patch.
 - **Zellij pane integration (future)**: Terminal output limitations (stack traces, multi-file diffs) would benefit from Zellij pane control — sending artifacts to split panes while keeping the chat loop clean. Not implemented; documented as a v3.0 direction.
 
 ---
@@ -192,14 +205,14 @@ Before any change:
 |------|---------|
 | `crates/anvil/src/main.rs` | CLI entry, clap args, MCP init, Ralph Loop |
 | `crates/anvil/src/commands.rs` | 17 slash commands (including /mode, /selftest) |
-| `crates/anvil/src/interactive.rs` | Readline loop, streaming display, status line |
-| `crates/anvil/src/render.rs` | Renderer trait, TerminalRenderer |
+| `crates/anvil/src/interactive.rs` | Readline loop, TurnPolicy, streaming display, status line |
+| `crates/anvil/src/render.rs` | Renderer trait, TerminalRenderer, KidsRenderer, select_renderer |
 | `crates/anvil/src/backend.rs` | Optional managed backend process (start/stop/health-check) |
 | `crates/anvil/src/watcher.rs` | File watcher (notify crate), debounce, noise filtering |
 | `crates/anvil/src/ipc.rs` | IPC wire protocol: length-prefixed JSON, Request/Response enums |
 | `crates/anvil/src/daemon.rs` | Daemon server: UDS listener, DaemonTask queue, dispatch loop |
 | `crates/anvil/src/client.rs` | IPC client: send prompt, daemon status/stop |
-| `crates/anvil-agent/src/agent.rs` | Agent::turn() core loop, mode-aware tool_choice |
+| `crates/anvil-agent/src/agent.rs` | Agent::turn() core loop, is_kids_mode(), mode-aware tool_choice |
 | `crates/anvil-agent/src/mode.rs` | Mode enum (Coding, Creative) |
 | `crates/anvil-agent/src/skills.rs` | Skill parsing, YAML frontmatter |
 | `crates/anvil-agent/src/autonomous.rs` | Ralph Loop runner |
@@ -223,7 +236,7 @@ Before any change:
 | `crates/anvil-llm/src/message.rs` | ChatMessage, ToolCall, ToolChoice, ChatRequest |
 | `crates/anvil-llm/src/stream.rs` | SSE stream parser for chunked LLM responses |
 | `crates/anvil-tools/src/tools.rs` | 11 tool implementations |
-| `crates/anvil-tools/src/executor.rs` | Tool dispatch, validation, WriteLedger integration |
+| `crates/anvil-tools/src/executor.rs` | Tool dispatch, validation, KidsSandbox, WriteLedger integration |
 | `crates/anvil-tools/src/definitions.rs` | Tool JSON schema definitions for the LLM |
 | `crates/anvil-tools/src/hooks.rs` | Pre/post hooks, platform-agnostic script discovery |
 | `crates/anvil-tools/src/permission.rs` | Tool permission system (auto-approve, prompt, deny) |

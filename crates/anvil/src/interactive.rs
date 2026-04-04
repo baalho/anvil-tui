@@ -2,6 +2,12 @@
 //!
 //! Handles prompt input, streaming LLM output display, status line updates,
 //! slash command dispatch, and achievement notifications.
+//!
+//! # TurnPolicy
+//! Per-turn behavioral decisions (auto-approve, rate limiting, renderer)
+//! are captured in [`TurnPolicy`] rather than scattered `if is_kids`
+//! checks. The policy is derived from `Agent::is_kids_mode()` at the
+//! start of each loop iteration and threaded through the turn.
 
 use anvil_agent::{
     AchievementStore, Agent, AgentEvent, AutonomousConfig, AutonomousRunner, IterationResult,
@@ -20,6 +26,45 @@ use tokio_util::sync::CancellationToken;
 
 use crate::commands::{self, CommandResult};
 use crate::render::{self, Renderer};
+
+/// Per-turn behavioral policy derived from `Agent::is_kids_mode()`.
+///
+/// Centralizes the decisions that differ between kids and standard mode:
+/// - **auto_approve**: Skip permission prompts (kids can't answer them).
+/// - **rate_limit**: Enforce a cooldown between messages (prevent spam).
+/// - **renderer**: `KidsRenderer` (fun messages) vs `TerminalRenderer`.
+///
+/// Built once per loop iteration via [`TurnPolicy::from_agent`], then
+/// threaded through the turn without re-querying the agent.
+struct TurnPolicy {
+    /// Auto-approve all tool calls without prompting.
+    auto_approve: bool,
+    /// Enforce a cooldown between user messages.
+    rate_limit: bool,
+    /// The renderer for this turn's output.
+    renderer: Box<dyn Renderer>,
+}
+
+impl TurnPolicy {
+    /// Derive the policy from the current agent state.
+    fn from_agent(agent: &Agent) -> Self {
+        let is_kids = agent.is_kids_mode();
+        Self {
+            auto_approve: is_kids,
+            rate_limit: is_kids,
+            renderer: render::select_renderer(is_kids),
+        }
+    }
+
+    /// Decide whether to allow a tool call or prompt the user.
+    fn permission_decision(&self, tool_name: &str, arguments: &str) -> Result<PermissionDecision> {
+        if self.auto_approve {
+            Ok(PermissionDecision::Allow)
+        } else {
+            prompt_permission(tool_name, arguments)
+        }
+    }
+}
 
 /// Tracks Ctrl+C state for double-press exit detection.
 struct CtrlCState {
@@ -48,7 +93,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
 
     // Reassigned per-turn based on persona (kids vs standard).
     #[allow(unused_assignments)]
-    let mut renderer: Box<dyn Renderer> = render::select_renderer(false);
+    let mut policy = TurnPolicy::from_agent(&agent);
     let stdin = io::stdin();
     let mut cumulative_usage = TokenUsage::default();
     let mut achievement_store = AchievementStore::load(agent.workspace());
@@ -135,10 +180,9 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
             .strip_suffix(":latest")
             .unwrap_or(agent.model());
         let persona = agent.persona();
-        let is_kids = agent.is_kids_mode();
-        renderer = render::select_renderer(is_kids);
+        policy = TurnPolicy::from_agent(agent);
 
-        let status = renderer.format_status(
+        let status = policy.renderer.format_status(
             &agent.mode().to_string(),
             model_short,
             persona.as_ref().map(|p| p.key.as_str()),
@@ -232,7 +276,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
 
         // Rate-limit user messages when kids mode is active.
         // Slash commands bypass the cooldown so /help always works.
-        if !trimmed.starts_with('/') && is_kids {
+        if !trimmed.starts_with('/') && policy.rate_limit {
             if let Some(last) = last_message_time {
                 const KIDS_INPUT_COOLDOWN_SECS: u64 = 2;
                 let elapsed = last.elapsed();
@@ -258,12 +302,12 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
             match commands::handle_command(trimmed, agent, &cumulative_usage).await {
                 CommandResult::Handled(output) => {
                     if !output.is_empty() {
-                        renderer.render_command_result(&output);
+                        policy.renderer.render_command_result(&output);
                     }
                     continue;
                 }
                 CommandResult::Compact => {
-                    renderer.render_info("  [compacting context...]");
+                    policy.renderer.render_info("  [compacting context...]");
 
                     let cancel = CancellationToken::new();
                     let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(64);
@@ -278,9 +322,9 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         Ok((returned_agent, Ok(result))) => {
                             agent_slot = Some(returned_agent);
                             if result.messages_removed == 0 {
-                                renderer.render_info("  [nothing to compact]");
+                                policy.renderer.render_info("  [nothing to compact]");
                             } else {
-                                renderer.render_info(&format!(
+                                policy.renderer.render_info(&format!(
                                     "  [compacted: {} messages removed, ~{} → ~{} tokens]",
                                     result.messages_removed,
                                     result.before_tokens,
@@ -290,7 +334,9 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         }
                         Ok((returned_agent, Err(e))) => {
                             agent_slot = Some(returned_agent);
-                            renderer.render_error(&format!("compaction failed: {e}"));
+                            policy
+                                .renderer
+                                .render_error(&format!("compaction failed: {e}"));
                         }
                         Err(e) => {
                             return Err(anyhow::anyhow!("compaction task panicked: {e}"));
@@ -413,9 +459,6 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         pending_triggers.extend(session_tracker.record_message());
 
         let prompt_owned = trimmed.to_string();
-        // Kids mode: auto-approve tools, use KidsRenderer.
-        // `is_kids` was computed above via agent.is_kids_mode().
-        let is_kids_turn = is_kids;
         let mut moved_agent = agent_slot.take().unwrap();
         let turn_cancel = cancel.clone();
         let turn_handle = tokio::spawn(async move {
@@ -482,7 +525,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
 
             // Close thinking box when transitioning to non-thinking events
             if in_thinking_block && !matches!(event, AgentEvent::ThinkingDelta(_)) {
-                renderer.render_thinking_end();
+                policy.renderer.render_thinking_end();
                 in_thinking_block = false;
                 needs_newline = false;
             }
@@ -490,11 +533,11 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
             match event {
                 AgentEvent::ThinkingDelta(text) => {
                     if !in_thinking_block {
-                        renderer.render_thinking_start();
+                        policy.renderer.render_thinking_start();
                         in_thinking_block = true;
                         needs_newline = true;
                     }
-                    renderer.render_thinking_delta(&text);
+                    policy.renderer.render_thinking_delta(&text);
                 }
                 AgentEvent::ContentDelta(text) => {
                     if !needs_newline {
@@ -506,7 +549,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         )?;
                         needs_newline = true;
                     }
-                    renderer.render_content_delta(&text);
+                    policy.renderer.render_content_delta(&text);
                 }
                 AgentEvent::ToolCallPending {
                     name, arguments, ..
@@ -518,7 +561,9 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
 
                     let icon = tool_icon(&name);
                     let short_args = truncate_display(&arguments, 80);
-                    renderer.render_tool_pending(&name, icon, &short_args);
+                    policy
+                        .renderer
+                        .render_tool_pending(&name, icon, &short_args);
 
                     // Track files created for session summary
                     if name == "file_write" {
@@ -532,13 +577,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                     // Track tool usage for achievements
                     pending_triggers.extend(session_tracker.record_tool_call(&name, &arguments));
 
-                    // Kids personas auto-approve all tool calls — permission
-                    // prompts are incomprehensible to a 7-year-old.
-                    let decision = if is_kids_turn {
-                        PermissionDecision::Allow
-                    } else {
-                        prompt_permission(&name, &arguments)?
-                    };
+                    let decision = policy.permission_decision(&name, &arguments)?;
                     let _ = perm_tx.send(decision).await;
                 }
                 AgentEvent::ToolResult { name, result } => {
@@ -547,7 +586,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
 
                     let icon = tool_icon(&name);
                     let text = result.text();
-                    renderer.render_tool_result(&name, icon, text);
+                    policy.renderer.render_tool_result(&name, icon, text);
                 }
                 AgentEvent::Usage(u) => {
                     cumulative_usage.prompt_tokens += u.prompt_tokens;
@@ -642,7 +681,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         println!();
                         needs_newline = false;
                     }
-                    renderer.render_error(&e);
+                    policy.renderer.render_error(&e);
                 }
             }
         }
@@ -695,18 +734,22 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         bp.stop();
     }
 
-    // Print session summary — select renderer based on final persona state
-    let final_is_kids = agent_slot
+    // Rebuild policy from final agent state for the session summary.
+    // The persona may have changed mid-session via /persona.
+    let final_policy = agent_slot
         .as_ref()
-        .map(|a| a.is_kids_mode())
-        .unwrap_or(false);
-    let final_renderer = render::select_renderer(final_is_kids);
+        .map(TurnPolicy::from_agent)
+        .unwrap_or_else(|| TurnPolicy {
+            auto_approve: false,
+            rate_limit: false,
+            renderer: render::select_renderer(false),
+        });
     print_session_summary(
         session_start.elapsed(),
         &cumulative_usage,
         &tool_use_counts,
         &files_created,
-        final_renderer.as_ref(),
+        final_policy.renderer.as_ref(),
     );
 
     if let Some(agent) = agent_slot {

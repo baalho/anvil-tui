@@ -4,6 +4,11 @@
 //! and LLM client. Each call to [`Agent::turn`] runs one complete
 //! prompt-response-tool cycle. Messages are appended to the `turn_messages`
 //! SQLite table for crash recovery.
+//!
+//! [`Agent::is_kids_mode`] is the single source of truth for whether
+//! kids-specific behavior is active (tool_choice=required, sandbox,
+//! auto-approve). The binary crate's `TurnPolicy` reads this once
+//! per turn to derive rendering and permission decisions.
 
 use crate::mode::Mode;
 use crate::routing::ModelRouter;
@@ -540,8 +545,9 @@ impl Agent {
     }
 
     /// Whether the agent is in kids mode — either a kids persona is active
-    /// or a kids-* skill is manually loaded. Controls tool_choice, auto-approve,
-    /// and renderer selection.
+    /// or a kids-* skill is manually loaded. Controls tool_choice (required
+    /// vs auto), sandbox activation, and the binary crate's `TurnPolicy`
+    /// (auto-approve, rate limiting, KidsRenderer).
     pub fn is_kids_mode(&self) -> bool {
         self.persona()
             .is_some_and(|p| crate::persona::is_kids_persona(&p.key))

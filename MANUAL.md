@@ -728,22 +728,31 @@ anvil run -p "optimize the build" -a --verify "cargo build" --max-minutes 15
 ## Kids Mode
 
 Kids personas (Sparkle, Bolt, Codebeard) are designed for children aged
-5-10. When a kids persona or kids-* skill is active:
+5-10. When a kids persona or kids-* skill is active, `Agent::is_kids_mode()`
+returns true and the interactive loop builds a `TurnPolicy` that enables
+all kids-specific behavior:
 
 - **Coding mode** — kids need `file_write` and `shell` to build things.
-  All personas now default to Coding mode (v2.2 change).
+  All personas default to Coding mode.
 - **tool_choice: required** — forces the model to use tools rather than
   just chatting. Small models with `tool_choice: auto` tend to converse
   instead of executing.
-- **Auto-approve** — permission prompts are skipped. A 7-year-old can't
-  understand "Allow file_write? [y/n/a]".
-- **KidsRenderer** — tool calls show fun messages ("✨ writing some magic
-  code...") instead of JSON schemas. Shell metadata (exit codes, stdout
-  prefixes) is stripped. File write results are silently swallowed.
-- **Input cooldown** — 2-second rate limit prevents prompt spamming.
-- **Shell sandbox** — commands restricted to an allowlist (echo, python3,
-  cargo, node, etc.). Interpreters can only run files within the sandbox
-  workspace, not inline code (`-c`/`-e` flags are blocked).
+- **Auto-approve** (`TurnPolicy.auto_approve`) — permission prompts are
+  skipped. A 7-year-old can't understand "Allow file_write? [y/n/a]".
+- **KidsRenderer** (`TurnPolicy.renderer`) — tool calls show fun messages
+  ("✨ writing some magic code...") instead of JSON schemas. Shell metadata
+  (exit codes, stdout prefixes) is stripped. File write results are
+  silently swallowed. Errors show "something went wonky" instead of
+  stack traces.
+- **Input cooldown** (`TurnPolicy.rate_limit`) — 2-second rate limit
+  prevents prompt spamming.
+- **Shell sandbox** (`KidsSandbox`) — two-layer validation:
+  1. **Command allowlist** — only permitted binaries can run (echo, cat,
+     ls, python3, cargo, node, etc.).
+  2. **Interpreter file validation** — python3, python, and node must
+     run script files within the sandbox workspace. Inline code flags
+     (`-c`, `-e`) are blocked. File paths are canonicalized and checked
+     against the sandbox workspace boundary.
 
 ### Setup
 
@@ -751,6 +760,7 @@ Kids personas (Sparkle, Bolt, Codebeard) are designed for children aged
 # config.toml
 [agent]
 kids_workspace = "~/kids-projects"
+# kids_allowed_commands = ["echo", "python3", "cargo"]  # optional override
 
 [[profiles]]
 name = "sparkle"
@@ -762,6 +772,8 @@ skills = ["kids-first"]
 ```bash
 anvil -p sparkle
 ```
+
+If `kids_workspace` is not configured, defaults to `$TMPDIR/anvil-kids-<pid>`.
 
 ---
 

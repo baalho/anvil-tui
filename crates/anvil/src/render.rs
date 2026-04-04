@@ -1,10 +1,13 @@
 //! Output rendering pipeline — abstracts how agent output reaches the user.
 //!
-//! The `Renderer` trait decouples the interactive loop from display logic.
-//! `TerminalRenderer` handles standard output. `KidsRenderer` wraps it to
-//! show fun messages instead of JSON schemas and shell metadata — the
-//! interactive loop calls the renderer uniformly without knowing which
-//! persona is active.
+//! The [`Renderer`] trait decouples the interactive loop from display logic.
+//! [`TerminalRenderer`] handles standard output. [`KidsRenderer`] wraps it
+//! to show fun messages instead of JSON schemas and shell metadata.
+//!
+//! [`select_renderer`] picks the correct implementation based on kids mode.
+//! The interactive loop's `TurnPolicy` holds the renderer for the current
+//! turn — the loop calls trait methods uniformly without knowing which
+//! implementation is active.
 
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use std::io::{self, Write};

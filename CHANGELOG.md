@@ -23,6 +23,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **Kids Mode section** in MANUAL.md.
 
 ### Changed
+- **TurnPolicy struct** — per-turn behavioral decisions (auto-approve,
+  rate limiting, renderer) extracted into `TurnPolicy` in `interactive.rs`.
+  Replaces scattered `if is_kids` checks with a single struct derived
+  from `Agent::is_kids_mode()` at the start of each loop iteration.
 - All personas default to **Coding mode** (kids need `file_write` + `shell`).
 - Kids personas/skills force `tool_choice: required` (action-first).
 - Kids tool calls are auto-approved (no permission prompts).
