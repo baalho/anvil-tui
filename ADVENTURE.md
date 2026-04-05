@@ -11,11 +11,25 @@ order — each step builds on the previous one. Estimated time: 15 minutes.
 # Build Anvil
 cargo build
 
-# Start your LLM backend (Ollama example)
+# Start your LLM backend — pick one:
+
+# Option A: Ollama
 ollama serve &
 ollama pull qwen3:8b
 ollama pull qwen3:0.6b   # small model for routing demo
+
+# Option B: llama-server
+llama-server -m your-model.gguf --port 8080 &
+
+# Option C: MLX (Apple Silicon)
+mlx_lm.server --model mlx-community/Qwen2.5-Coder-7B-Instruct-4bit &
+
+# Initialize Anvil (first time only)
+./target/debug/anvil init
 ```
+
+Configure your backend in `.anvil/config.toml` if not using Ollama
+defaults. See the MANUAL for backend-specific setup.
 
 ---
 
@@ -69,11 +83,19 @@ The LLM still sees plain text — tables are a display-only enhancement.
 
 > *Why use a cannon when a slingshot will do?*
 
-Set up model routing — use a tiny model for simple tools:
+Set up model routing — use a smaller model for simple tools. Replace
+the model names below with models available on your backend:
 
 ```
-you> /route shell qwen3:0.6b
-you> /route grep qwen3:0.6b
+you> /model
+```
+
+Note your current model (the "big" one). Now pick a smaller model
+and set up routes:
+
+```
+you> /route shell <small-model>
+you> /route grep <small-model>
 you> /route
 ```
 
@@ -87,7 +109,7 @@ you> run `echo "hello from the small model"` and then explain what happened
 Watch the status line — you'll see:
 
 ```
-  [routing: qwen3:8b → qwen3:0.6b]
+  [routing: <big-model> → <small-model>]
 ```
 
 The shell command runs on the small model, then the explanation
