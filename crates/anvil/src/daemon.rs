@@ -39,10 +39,18 @@ enum DaemonTask {
         reply_tx: mpsc::Sender<AgentEvent>,
         auto_approve: bool,
     },
+    /// File change detected by the watcher.
+    FileChanged { paths: Vec<std::path::PathBuf> },
     /// Query daemon status.
     Status { reply_tx: oneshot::Sender<Response> },
     /// Graceful shutdown.
     Shutdown,
+}
+
+/// Watch configuration passed from the CLI to the daemon.
+pub struct DaemonWatchConfig {
+    pub ignore_patterns: Vec<String>,
+    pub debounce_secs: u64,
 }
 
 /// Run the daemon server. Blocks until shutdown.
@@ -50,7 +58,8 @@ enum DaemonTask {
 /// Binds a UDS listener, writes a PID file, and enters the dispatch loop.
 /// On exit (signal or IPC shutdown), cleans up the socket and PID file.
 /// The socket is workspace-scoped so multiple daemons can run concurrently.
-pub async fn run_daemon(mut agent: Agent) -> Result<()> {
+/// When `watch_config` is provided, a file watcher runs alongside IPC.
+pub async fn run_daemon(mut agent: Agent, watch_config: Option<DaemonWatchConfig>) -> Result<()> {
     let workspace = agent.workspace().to_path_buf();
     let sock_path = ipc::socket_path(&workspace);
     let pid_path = ipc::pid_path(&workspace);
@@ -133,6 +142,46 @@ pub async fn run_daemon(mut agent: Agent) -> Result<()> {
         }
     });
 
+    // Spawn: file watcher (optional, when --watch is active)
+    let watching = watch_config.is_some();
+    if let Some(wc) = watch_config {
+        let watcher_tx = task_tx.clone();
+        let watcher_workspace = agent.workspace().to_path_buf();
+        let write_ledger = agent.write_ledger();
+        eprintln!("  watching: enabled (debounce: {}s)", wc.debounce_secs);
+        tokio::task::spawn_blocking(move || {
+            let config = crate::watcher::WatchConfig {
+                workspace: watcher_workspace,
+                debounce: std::time::Duration::from_secs(wc.debounce_secs),
+                ignore_patterns: wc.ignore_patterns,
+                write_ledger: Some(write_ledger),
+            };
+            // Bridge: watcher sends Event, we convert to DaemonTask
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
+            // Run the watcher in this blocking thread
+            std::thread::spawn(move || {
+                if let Err(e) = crate::watcher::run_file_watcher(config, event_tx) {
+                    tracing::warn!("file watcher error: {e}");
+                }
+            });
+            // Forward events to the daemon task channel
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                while let Some(event) = event_rx.recv().await {
+                    if let anvil_agent::Event::FileChanged { paths } = event {
+                        if watcher_tx
+                            .send(DaemonTask::FileChanged { paths })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            });
+        });
+    }
+
     // Spawn: signal handler (SIGINT / SIGTERM)
     let signal_tx = task_tx.clone();
     let signal_token = shutdown_token.clone();
@@ -184,6 +233,43 @@ pub async fn run_daemon(mut agent: Agent) -> Result<()> {
                 // The connection handler's recv loop exits cleanly.
             }
 
+            DaemonTask::FileChanged { paths } => {
+                let file_names: Vec<String> = paths
+                    .iter()
+                    .filter_map(|p| p.file_name())
+                    .map(|f| f.to_string_lossy().to_string())
+                    .collect();
+                let file_list = file_names.join(", ");
+                tracing::info!("file change: {file_list}");
+                eprintln!("  file change: {file_list}");
+
+                let event = Event::FileChanged { paths };
+                let cancel = shutdown_token.child_token();
+                // File-triggered turns auto-approve all tools (no user to prompt)
+                let (perm_tx, perm_rx) = mpsc::channel::<PermissionDecision>(1);
+                tokio::spawn(async move {
+                    loop {
+                        if perm_tx.send(PermissionDecision::Allow).await.is_err() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                });
+                // No reply channel — file-triggered turns log to stderr only
+                let (log_tx, mut log_rx) = mpsc::channel::<AgentEvent>(64);
+                tokio::spawn(async move {
+                    while let Some(event) = log_rx.recv().await {
+                        match event {
+                            AgentEvent::ContentDelta(text) => eprint!("{text}"),
+                            AgentEvent::Error(e) => eprintln!("\n  error: {e}"),
+                            AgentEvent::TurnComplete => eprintln!("\n  [turn complete]"),
+                            _ => {}
+                        }
+                    }
+                });
+                let _ = dispatch_event(&mut agent, event, &log_tx, perm_rx, cancel).await;
+            }
+
             DaemonTask::Status { reply_tx } => {
                 let uptime = start_time.elapsed().as_secs();
                 let response = Response::StatusInfo {
@@ -191,6 +277,7 @@ pub async fn run_daemon(mut agent: Agent) -> Result<()> {
                     model: agent.model().to_string(),
                     mode: agent.mode().to_string(),
                     uptime_secs: uptime,
+                    watching,
                     pid,
                 };
                 let _ = reply_tx.send(response);
@@ -284,7 +371,8 @@ async fn handle_connection(stream: UnixStream, task_tx: mpsc::Sender<DaemonTask>
                     | AgentEvent::LoopDetected { .. }
                     | AgentEvent::ContextWarning { .. }
                     | AgentEvent::AutoCompacted { .. }
-                    | AgentEvent::ToolOutputDelta { .. } => continue,
+                    | AgentEvent::ToolOutputDelta { .. }
+                    | AgentEvent::ModelSwitched { .. } => continue,
                 };
 
                 match tokio::time::timeout(WRITE_TIMEOUT, ipc::write_frame(&mut writer, &response))

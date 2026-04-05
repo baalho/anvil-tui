@@ -1,6 +1,6 @@
 [package]
 name = "anvil"
-version = "2.2.0"
+version = "3.0.0"
 description = "CLI binary with TUI for the Anvil coding agent"
 edition.workspace = true
 license.workspace = true
@@ -15,6 +15,7 @@ anvil-config = { workspace = true }
 anvil-llm = { workspace = true }
 anvil-tools = { workspace = true }
 anvil-agent = { workspace = true }
+base64 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

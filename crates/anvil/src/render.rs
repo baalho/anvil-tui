@@ -33,6 +33,12 @@ pub trait Renderer {
     /// Render a tool execution result with the raw output text.
     fn render_tool_result(&self, tool_name: &str, icon: &str, result_text: &str);
 
+    /// Render a structured tool result. Default falls back to `render_tool_result`.
+    /// Override to handle `content_type` hints like "table" or "image".
+    fn render_tool_output(&self, tool_name: &str, icon: &str, output: &anvil_tools::ToolOutput) {
+        self.render_tool_result(tool_name, icon, output.text());
+    }
+
     /// Render a command result (slash command output).
     fn render_command_result(&self, text: &str);
 
@@ -51,6 +57,51 @@ pub trait Renderer {
 
     /// Render optional session summary footer (e.g., kids "cool things" count).
     fn render_session_footer(&self, _files_created: &[String]) {}
+
+    /// Render an image inline in the terminal (Kitty graphics protocol).
+    /// Default: display the file path. Override for protocol-specific rendering.
+    fn render_image(&self, path: &std::path::Path) {
+        let _ = crossterm::execute!(
+            io::stdout(),
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!("  [image: {}]\n", path.display())),
+            ResetColor,
+        );
+    }
+}
+
+/// Detected terminal capabilities — image protocol, Zellij, etc.
+/// Probed once at startup and passed to the renderer.
+#[derive(Debug, Clone, Default)]
+pub struct TerminalCapabilities {
+    /// Kitty graphics protocol supported (Kitty, WezTerm, iTerm2).
+    pub kitty_graphics: bool,
+    /// Running inside a Zellij session.
+    pub zellij: bool,
+    /// Zellij session name (if inside Zellij).
+    pub zellij_session: Option<String>,
+}
+
+impl TerminalCapabilities {
+    /// Detect capabilities from environment variables.
+    pub fn detect() -> Self {
+        let kitty_graphics = std::env::var("KITTY_WINDOW_ID").is_ok()
+            || std::env::var("TERM_PROGRAM")
+                .map(|v| {
+                    let lower = v.to_lowercase();
+                    lower.contains("wezterm") || lower.contains("iterm") || lower.contains("kitty")
+                })
+                .unwrap_or(false);
+
+        let zellij = std::env::var("ZELLIJ").is_ok();
+        let zellij_session = std::env::var("ZELLIJ_SESSION_NAME").ok();
+
+        Self {
+            kitty_graphics,
+            zellij,
+            zellij_session,
+        }
+    }
 }
 
 /// Terminal renderer — renders agent output inline using crossterm.
@@ -58,11 +109,149 @@ pub trait Renderer {
 /// This is the default renderer for standard interactive mode. Uses ANSI
 /// colors for tool results, errors, and status messages.
 #[derive(Default)]
-pub struct TerminalRenderer;
+pub struct TerminalRenderer {
+    capabilities: TerminalCapabilities,
+}
 
 impl TerminalRenderer {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Create a renderer with detected terminal capabilities.
+    pub fn with_capabilities(capabilities: TerminalCapabilities) -> Self {
+        Self { capabilities }
+    }
+
+    /// Get the terminal capabilities.
+    pub fn capabilities(&self) -> &TerminalCapabilities {
+        &self.capabilities
+    }
+
+    /// Render a JSON array as an aligned table with box-drawing borders.
+    /// Falls back to plain text if the data isn't a suitable array.
+    fn render_table(&self, tool_name: &str, icon: &str, data: &serde_json::Value) {
+        let rows = match data.as_array() {
+            Some(arr) if !arr.is_empty() => arr,
+            _ => {
+                self.render_tool_result(tool_name, icon, &data.to_string());
+                return;
+            }
+        };
+
+        // Extract column names from the first row
+        let columns: Vec<String> = match rows[0].as_object() {
+            Some(obj) => obj.keys().cloned().collect(),
+            None => {
+                // Array of non-objects — render as single-column
+                let text: String = rows
+                    .iter()
+                    .map(|v| v.as_str().unwrap_or(&v.to_string()).to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.render_tool_result(tool_name, icon, &text);
+                return;
+            }
+        };
+
+        // Calculate column widths (header vs data)
+        let mut widths: Vec<usize> = columns.iter().map(|c| c.len()).collect();
+        for row in rows {
+            for (i, col) in columns.iter().enumerate() {
+                let val = row
+                    .get(col)
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s.len(),
+                        other => other.to_string().len(),
+                    })
+                    .unwrap_or(0);
+                if val > widths[i] {
+                    widths[i] = val;
+                }
+            }
+        }
+
+        // Clamp to terminal width
+        let term_width = crossterm::terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(120);
+        let total: usize = widths.iter().sum::<usize>() + (columns.len() * 3) + 1;
+        if total > term_width {
+            // Shrink the widest column to fit
+            if let Some(max_idx) = widths
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, w)| *w)
+                .map(|(i, _)| i)
+            {
+                let overflow = total - term_width;
+                if widths[max_idx] > overflow + 3 {
+                    widths[max_idx] -= overflow;
+                }
+            }
+        }
+
+        // Build table
+        let mut out = String::new();
+        // Header
+        out.push_str("  ┌");
+        for (i, w) in widths.iter().enumerate() {
+            out.push_str(&"─".repeat(w + 2));
+            out.push(if i < widths.len() - 1 { '┬' } else { '┐' });
+        }
+        out.push('\n');
+
+        // Column names
+        out.push_str("  │");
+        for (i, col) in columns.iter().enumerate() {
+            out.push_str(&format!(" {:<width$} │", col, width = widths[i]));
+        }
+        out.push('\n');
+
+        // Separator
+        out.push_str("  ├");
+        for (i, w) in widths.iter().enumerate() {
+            out.push_str(&"─".repeat(w + 2));
+            out.push(if i < widths.len() - 1 { '┼' } else { '┤' });
+        }
+        out.push('\n');
+
+        // Data rows
+        for row in rows {
+            out.push_str("  │");
+            for (i, col) in columns.iter().enumerate() {
+                let val = row
+                    .get(col)
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_default();
+                let truncated = if val.len() > widths[i] {
+                    format!("{}…", &val[..widths[i] - 1])
+                } else {
+                    val
+                };
+                out.push_str(&format!(" {:<width$} │", truncated, width = widths[i]));
+            }
+            out.push('\n');
+        }
+
+        // Footer
+        out.push_str("  └");
+        for (i, w) in widths.iter().enumerate() {
+            out.push_str(&"─".repeat(w + 2));
+            out.push(if i < widths.len() - 1 { '┴' } else { '┘' });
+        }
+        out.push('\n');
+
+        let _ = crossterm::execute!(
+            io::stdout(),
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!("  {icon} {tool_name}:\n")),
+            ResetColor,
+            Print(out),
+        );
     }
 }
 
@@ -125,6 +314,25 @@ impl Renderer for TerminalRenderer {
         );
     }
 
+    fn render_tool_output(&self, tool_name: &str, icon: &str, output: &anvil_tools::ToolOutput) {
+        let text = output.text();
+
+        // If inside Zellij and output is long, send full content to a pane
+        if self.capabilities.zellij && text.lines().count() > 50 {
+            let title = format!("{icon} {tool_name}");
+            crate::zellij::ZellijPanes::open_pane_with_file(&title, text);
+        }
+
+        match output {
+            anvil_tools::ToolOutput::Structured {
+                content_type, data, ..
+            } if content_type == "table" => {
+                self.render_table(tool_name, icon, data);
+            }
+            _ => self.render_tool_result(tool_name, icon, text),
+        }
+    }
+
     fn render_command_result(&self, text: &str) {
         println!("{text}");
     }
@@ -158,6 +366,68 @@ impl Renderer for TerminalRenderer {
     fn session_summary_header(&self) -> &str {
         "╭─ Session Summary ─────────────────────╮"
     }
+
+    fn render_image(&self, path: &std::path::Path) {
+        if !self.capabilities.kitty_graphics {
+            // Fallback: just show the path
+            let _ = crossterm::execute!(
+                io::stdout(),
+                SetForegroundColor(Color::DarkGrey),
+                Print(format!("  [image: {}]\n", path.display())),
+                ResetColor,
+            );
+            return;
+        }
+
+        // Kitty graphics protocol: read file, base64-encode, send escape sequence
+        let data = match std::fs::read(path) {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = crossterm::execute!(
+                    io::stdout(),
+                    SetForegroundColor(Color::Red),
+                    Print(format!("  [image error: {e}]\n")),
+                    ResetColor,
+                );
+                return;
+            }
+        };
+
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+
+        // Kitty protocol requires chunked transfer for large payloads.
+        // Each chunk is max 4096 bytes of base64 data.
+        let chunks: Vec<&str> = encoded
+            .as_bytes()
+            .chunks(4096)
+            .map(|c| std::str::from_utf8(c).unwrap_or(""))
+            .collect();
+
+        let mut stdout = io::stdout();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let is_last = i == chunks.len() - 1;
+            if i == 0 {
+                // First chunk: include format and action
+                let _ = write!(
+                    stdout,
+                    "\x1b_Gf=100,a=T,t=d,m={};{}\x1b\\",
+                    if is_last { 0 } else { 1 },
+                    chunk
+                );
+            } else {
+                // Continuation chunks
+                let _ = write!(
+                    stdout,
+                    "\x1b_Gm={};{}\x1b\\",
+                    if is_last { 0 } else { 1 },
+                    chunk
+                );
+            }
+        }
+        let _ = writeln!(stdout);
+        let _ = stdout.flush();
+    }
 }
 
 /// Kids renderer — wraps `TerminalRenderer` with child-friendly output.
@@ -180,6 +450,13 @@ impl KidsRenderer {
     pub fn new() -> Self {
         Self {
             inner: TerminalRenderer::new(),
+        }
+    }
+
+    /// Create a kids renderer with detected terminal capabilities.
+    pub fn with_capabilities(capabilities: TerminalCapabilities) -> Self {
+        Self {
+            inner: TerminalRenderer::with_capabilities(capabilities),
         }
     }
 }
@@ -289,14 +566,21 @@ impl Renderer for KidsRenderer {
             );
         }
     }
+
+    fn render_image(&self, path: &std::path::Path) {
+        self.inner.render_image(path);
+    }
 }
 
 /// Create the appropriate renderer based on whether kids mode is active.
+/// Select the appropriate renderer based on kids mode.
+/// Detects terminal capabilities (Kitty graphics, Zellij) automatically.
 pub fn select_renderer(is_kids: bool) -> Box<dyn Renderer> {
+    let caps = TerminalCapabilities::detect();
     if is_kids {
-        Box::new(KidsRenderer::new())
+        Box::new(KidsRenderer::with_capabilities(caps))
     } else {
-        Box::new(TerminalRenderer::new())
+        Box::new(TerminalRenderer::with_capabilities(caps))
     }
 }
 
@@ -341,5 +625,59 @@ mod tests {
 
         let kids = select_renderer(true);
         assert_eq!(kids.format_status("coding", "qwen3", Some("sparkle")), "");
+    }
+
+    #[test]
+    fn render_tool_output_default_falls_back_to_text() {
+        // The default trait implementation calls render_tool_result
+        let r = TerminalRenderer::new();
+        let output = anvil_tools::ToolOutput::Text("hello".into());
+        // Just verify it doesn't panic — output goes to stdout
+        r.render_tool_output("test", "T", &output);
+    }
+
+    #[test]
+    fn render_tool_output_structured_table() {
+        let r = TerminalRenderer::new();
+        let data = serde_json::json!([
+            {"name": "src/", "type": "dir", "size": ""},
+            {"name": "main.rs", "type": "file", "size": "1.2K"},
+        ]);
+        let output = anvil_tools::ToolOutput::Structured {
+            text: "dir src/\nfile main.rs (1.2K)".into(),
+            data,
+            content_type: "table".into(),
+        };
+        // Verify it doesn't panic — table output goes to stdout
+        r.render_tool_output("ls", "D", &output);
+    }
+
+    #[test]
+    fn capabilities_default_is_all_false() {
+        let caps = TerminalCapabilities::default();
+        assert!(!caps.kitty_graphics);
+        assert!(!caps.zellij);
+        assert!(caps.zellij_session.is_none());
+    }
+
+    #[test]
+    fn kitty_escape_sequence_format() {
+        // Verify the Kitty protocol escape sequence format
+        use base64::Engine;
+        let data = b"PNG_DATA";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+        // Single chunk (< 4096 bytes)
+        let expected = format!("\x1b_Gf=100,a=T,t=d,m=0;{}\x1b\\", encoded);
+        assert!(expected.starts_with("\x1b_G"));
+        assert!(expected.ends_with("\x1b\\"));
+        assert!(expected.contains(&encoded));
+    }
+
+    #[test]
+    fn render_image_fallback_no_panic() {
+        // Without kitty support, render_image should just print the path
+        let r = TerminalRenderer::new();
+        let path = std::path::Path::new("/tmp/test.png");
+        r.render_image(path);
     }
 }

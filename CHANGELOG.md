@@ -5,6 +5,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [v3.0.0] — 2025-07-25 — Complete Feature Release
+
+All 6 deferred features implemented. No more "future" hedging.
+
+### Added
+- **Model routing in agent.turn()** — `/route shell qwen3:8b` now
+  actually switches models during tool-result follow-up requests.
+  `AgentEvent::ModelSwitched` emitted on switch. Original model
+  restored after each request.
+- **Skill tag search** — `/skill search <keywords>` matches against
+  tags, name, description, and category. Multiple keywords are
+  AND-matched.
+- **Daemon watch mode** — `anvil daemon start --watch` combines the
+  daemon and file watcher in a single process. File changes become
+  `DaemonTask::FileChanged` tasks. `anvil daemon status` shows
+  `watching: yes/no`.
+- **Structured output + table rendering** — `ls`, `grep`, `find`
+  return `ToolOutput::Structured` with `content_type: "table"`.
+  `TerminalRenderer` formats tables with box-drawing borders.
+  LLM still sees plain text.
+- **Image rendering (Kitty protocol)** — `TerminalCapabilities`
+  detects Kitty/WezTerm/iTerm2 via env vars. PNG/JPEG rendered
+  inline with chunked base64 transfer. Fallback: display file path.
+- **Zellij pane integration** — `ZellijPanes` helper sends long
+  tool output (>50 lines) to floating panes when inside Zellij.
+  `/pane <text>` command for manual pane control. Best-effort with
+  silent fallback.
+- **`/pane` slash command** — send arbitrary text to a Zellij
+  floating pane.
+- `base64` workspace dependency (already transitive, now explicit).
+
+### Changed
+- `AgentEvent::ToolResult` carries full `ToolOutput` (was just text).
+  **Breaking**: code matching on this variant must update.
+- `Renderer` trait gains `render_tool_output`, `render_image` methods
+  with default implementations. **Breaking** for custom renderers.
+- `TerminalRenderer` now holds `TerminalCapabilities` (detected at
+  startup). Construction via `with_capabilities()` or `Default`.
+- `select_renderer()` auto-detects terminal capabilities.
+- `daemon::run_daemon()` accepts `Option<DaemonWatchConfig>`.
+- Interactive loop uses `render_tool_output` instead of
+  `render_tool_result` for structured output support.
+
 ## [v2.2.0] — 2025-07-25 — Kids Mode Overhaul
 
 ### Added

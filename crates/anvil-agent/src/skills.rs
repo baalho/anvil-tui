@@ -62,6 +62,30 @@ pub struct Skill {
     pub depends: Vec<String>,
 }
 
+impl Skill {
+    /// Whether this skill matches all given keywords (case-insensitive).
+    /// Searches key, name, description, category, and tags.
+    pub fn matches(&self, keywords: &[&str]) -> bool {
+        if keywords.is_empty() {
+            return false;
+        }
+        keywords.iter().all(|kw| {
+            let kw_lower = kw.to_lowercase();
+            self.key.to_lowercase().contains(&kw_lower)
+                || self.name.to_lowercase().contains(&kw_lower)
+                || self.description.to_lowercase().contains(&kw_lower)
+                || self
+                    .category
+                    .as_ref()
+                    .is_some_and(|c| c.to_lowercase().contains(&kw_lower))
+                || self
+                    .tags
+                    .iter()
+                    .any(|t| t.to_lowercase().contains(&kw_lower))
+        })
+    }
+}
+
 /// YAML frontmatter structure, deserialized from the `---` block.
 ///
 /// All fields are optional — a skill can have partial frontmatter.
@@ -531,5 +555,76 @@ Use docker commands to manage containers.
         assert!(skill.category.is_none());
         assert!(skill.tags.is_empty());
         assert!(skill.required_env.is_empty());
+    }
+
+    #[test]
+    fn matches_by_tag() {
+        let skill = Skill {
+            key: "containers".into(),
+            name: "Container Management".into(),
+            description: "Manage Docker containers".into(),
+            content: String::new(),
+            category: Some("infrastructure".into()),
+            tags: vec!["docker".into(), "compose".into()],
+            required_env: vec![],
+            verify_command: None,
+            depends: vec![],
+        };
+        assert!(skill.matches(&["docker"]));
+        assert!(skill.matches(&["compose"]));
+        assert!(skill.matches(&["DOCKER"])); // case-insensitive
+        assert!(!skill.matches(&["kubernetes"]));
+    }
+
+    #[test]
+    fn matches_by_name_and_description() {
+        let skill = Skill {
+            key: "deploy".into(),
+            name: "Deployment".into(),
+            description: "Deploy services to production".into(),
+            content: String::new(),
+            category: Some("infrastructure".into()),
+            tags: vec![],
+            required_env: vec![],
+            verify_command: None,
+            depends: vec![],
+        };
+        assert!(skill.matches(&["deploy"]));
+        assert!(skill.matches(&["production"]));
+        assert!(skill.matches(&["infra"])); // matches category
+    }
+
+    #[test]
+    fn matches_multiple_keywords_are_and() {
+        let skill = Skill {
+            key: "containers".into(),
+            name: "Container Management".into(),
+            description: "Manage Docker containers".into(),
+            content: String::new(),
+            category: Some("infrastructure".into()),
+            tags: vec!["docker".into(), "compose".into()],
+            required_env: vec![],
+            verify_command: None,
+            depends: vec![],
+        };
+        assert!(skill.matches(&["docker", "compose"]));
+        assert!(skill.matches(&["docker", "container"]));
+        assert!(!skill.matches(&["docker", "kubernetes"]));
+    }
+
+    #[test]
+    fn matches_empty_keywords_returns_false() {
+        let skill = Skill {
+            key: "test".into(),
+            name: "Test".into(),
+            description: "Test skill".into(),
+            content: String::new(),
+            category: None,
+            tags: vec![],
+            required_env: vec![],
+            verify_command: None,
+            depends: vec![],
+        };
+        assert!(!skill.matches(&[]));
     }
 }

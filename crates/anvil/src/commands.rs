@@ -59,6 +59,7 @@ pub async fn handle_command(
         "/think" => CommandResult::Handled(think_command(agent)),
         "/memory" => CommandResult::Handled(memory_command(agent, arg)),
         "/mode" => CommandResult::Handled(mode_command(agent, arg)),
+        "/pane" => CommandResult::Handled(pane_command(arg)),
         "/route" => CommandResult::Handled(route_command(agent, arg)),
         "/skill" => CommandResult::Handled(skill_command(agent, arg)),
         "/mcp" => CommandResult::Handled(mcp_command(agent, arg).await),
@@ -89,6 +90,7 @@ fn help_text() -> String {
                 ("/backend [type url]", "Show or switch backend"),
                 ("/backend start llama <model>", "Start managed llama-server"),
                 ("/backend stop", "Stop managed backend"),
+                ("/pane <text>", "Send text to a Zellij floating pane"),
                 ("/route [tool model]", "Show or set model routing"),
             ],
         ),
@@ -96,6 +98,7 @@ fn help_text() -> String {
             "Skills & Personas",
             &[
                 ("/skill [name]", "List, activate, or verify skills"),
+                ("/skill search <kw>", "Search skills by tag or keyword"),
                 ("/skill clear", "Deactivate all skills"),
                 ("/persona [name]", "Activate a persona"),
                 ("/persona clear", "Deactivate persona"),
@@ -172,6 +175,21 @@ fn mode_command(agent: &mut Agent, arg: &str) -> String {
             "mode: creative ✨ (direct output, no tools)".to_string()
         }
         _ => "usage: /mode [coding|creative]".to_string(),
+    }
+}
+
+/// Send content to a Zellij floating pane.
+fn pane_command(arg: &str) -> String {
+    if arg.is_empty() {
+        return "usage: /pane <text to display in floating pane>".to_string();
+    }
+    if !crate::zellij::ZellijPanes::is_available() {
+        return "not inside a Zellij session — /pane requires Zellij".to_string();
+    }
+    if crate::zellij::ZellijPanes::open_pane_with_file("anvil", arg) {
+        "opened floating pane".to_string()
+    } else {
+        "failed to open Zellij pane".to_string()
     }
 }
 
@@ -916,12 +934,13 @@ fn parse_backend_start_args(input: &str) -> (String, u16) {
     (model_path, port)
 }
 
-/// Handle `/skill` — list, activate, deactivate, or verify skills.
+/// Handle `/skill` — list, activate, deactivate, search, or verify skills.
 ///
 /// # Subcommands
 /// - `/skill` — list all skills, grouped by category
 /// - `/skill <name>` — activate a skill (injects into system prompt + enables env vars)
 /// - `/skill clear` — deactivate all skills
+/// - `/skill search <keywords>` — search skills by tag, name, or description
 /// - `/skill verify <name>` — run a skill's verification command
 fn skill_command(agent: &mut Agent, arg: &str) -> String {
     let loader = SkillLoader::new(agent.workspace());
@@ -933,6 +952,15 @@ fn skill_command(agent: &mut Agent, arg: &str) -> String {
     if arg == "clear" {
         agent.clear_skills();
         return "all skills deactivated".to_string();
+    }
+
+    // Handle `/skill search <keywords>`
+    if let Some(query) = arg.strip_prefix("search ") {
+        let query = query.trim();
+        if query.is_empty() {
+            return "usage: /skill search <keyword> [keyword...]".to_string();
+        }
+        return search_skills(&loader, query);
     }
 
     // Handle `/skill verify <name>`
@@ -1022,6 +1050,39 @@ fn list_skills(loader: &SkillLoader, agent: &Agent) -> String {
 /// # How verification works
 /// Each skill can declare a `verify` command in its frontmatter:
 /// ```yaml
+/// Search skills by keyword — matches against tags, key, name, description, and category.
+/// Multiple keywords are AND-matched (all must match somewhere in the skill).
+fn search_skills(loader: &SkillLoader, query: &str) -> String {
+    let skills = loader.scan();
+    let keywords: Vec<&str> = query.split_whitespace().collect();
+
+    let matches: Vec<&anvil_agent::Skill> =
+        skills.iter().filter(|s| s.matches(&keywords)).collect();
+
+    if matches.is_empty() {
+        return format!("no skills matching '{query}'");
+    }
+
+    let mut output = format!("Skills matching '{query}':\n\n");
+    for skill in &matches {
+        let tags = if skill.tags.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", skill.tags.join(", "))
+        };
+        let cat = skill
+            .category
+            .as_deref()
+            .map(|c| format!(" ({c})"))
+            .unwrap_or_default();
+        output.push_str(&format!(
+            "  {} — {}{}{}\n",
+            skill.key, skill.description, cat, tags
+        ));
+    }
+    output
+}
+
 /// verify: "docker info --format '{{.ServerVersion}}'"
 /// ```
 /// This command is run via `sh -c` (or `cmd.exe /C` on Windows).

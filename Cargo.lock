@@ -72,13 +72,14 @@ dependencies = [
 
 [[package]]
 name = "anvil"
-version = "2.2.0"
+version = "3.0.0"
 dependencies = [
  "anvil-agent",
  "anvil-config",
  "anvil-llm",
  "anvil-tools",
  "anyhow",
+ "base64",
  "chrono",
  "clap",
  "crossterm",
@@ -97,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-agent"
-version = "2.2.0"
+version = "3.0.0"
 dependencies = [
  "anvil-config",
  "anvil-llm",
@@ -120,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-config"
-version = "2.2.0"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -135,7 +136,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-llm"
-version = "2.2.0"
+version = "3.0.0"
 dependencies = [
  "anvil-config",
  "anyhow",
@@ -154,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-mcp"
-version = "2.2.0"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -168,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-tools"
-version = "2.2.0"
+version = "3.0.0"
 dependencies = [
  "anvil-config",
  "anyhow",

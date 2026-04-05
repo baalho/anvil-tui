@@ -1,7 +1,7 @@
 # Anvil Manual
 
 A local-first coding agent forged in Rust. Runs offline, connects to
-Ollama, llama-server, or MLX. Version 2.2.
+Ollama, llama-server, or MLX. Version 3.0.
 
 ---
 
@@ -876,3 +876,110 @@ decomposed fields.
 3. Add the dispatch case in `crates/anvil-tools/src/executor.rs`
 4. Classify as read-only or mutating in `crates/anvil-tools/src/permission.rs`
 5. Add tests in `crates/anvil-tools/tests/tool_tests.rs`
+
+---
+
+## Model Routing
+
+Route specific tools to different models. Use small models for simple
+tasks (grep, ls) and large models for code generation.
+
+```
+/route shell qwen3:8b       # shell tool uses 8B model
+/route grep qwen3:4b        # grep uses 4B model
+/route * qwen3:30b          # everything else uses 30B
+/route                      # show current routes
+/route clear                # remove all routes
+```
+
+When a routed tool is called, the agent temporarily switches to the
+routed model for the next LLM request, then restores the original.
+The interactive loop shows `[routing: model-a → model-b]` when a
+switch occurs.
+
+---
+
+## Skill Search
+
+Search skills by keyword — matches tags, name, description, and category.
+
+```
+/skill search docker         # find Docker-related skills
+/skill search docker compose # AND match — both terms must match
+/skill search infra          # matches category "infrastructure"
+```
+
+---
+
+## Daemon Watch Mode
+
+Combine the daemon and file watcher in a single process:
+
+```bash
+anvil daemon start --watch
+anvil daemon start --watch --ignore target --debounce 3
+```
+
+File changes trigger agent turns through the daemon's task queue.
+IPC prompts (`anvil send`) work alongside file watching. The write
+ledger prevents feedback loops (agent's own file writes don't trigger
+new turns).
+
+Check status:
+```bash
+anvil daemon status
+# shows: watching: yes
+```
+
+---
+
+## Table Rendering
+
+`ls`, `grep`, and `find` output is rendered as aligned tables with
+box-drawing borders:
+
+```
+  ┌──────┬────────────┬───────┐
+  │ type │ name       │ size  │
+  ├──────┼────────────┼───────┤
+  │ dir  │ src/       │       │
+  │ file │ main.rs    │ 1.2K  │
+  │ file │ Cargo.toml │ 450B  │
+  └──────┴────────────┴───────┘
+```
+
+Tables auto-truncate to terminal width. The LLM still sees plain text
+(the `text` field of `ToolOutput::Structured`), so model behavior is
+unchanged.
+
+---
+
+## Image Rendering
+
+Anvil renders PNG/JPEG images inline in terminals that support the
+Kitty graphics protocol (Kitty, WezTerm, iTerm2).
+
+Detection is automatic via environment variables:
+- `$KITTY_WINDOW_ID` — Kitty terminal
+- `$TERM_PROGRAM` containing "WezTerm", "iTerm", or "Kitty"
+
+In unsupported terminals, image paths are displayed as text.
+
+Large images are chunked per the Kitty protocol spec (4096-byte
+base64 chunks).
+
+---
+
+## Zellij Pane Integration
+
+When running inside Zellij, long tool output (>50 lines) is
+automatically sent to a floating pane for scrollable viewing.
+The chat loop still shows the truncated version.
+
+Manual pane control:
+```
+/pane <text>                 # send text to a floating pane
+```
+
+Detection: `$ZELLIJ` environment variable. All pane operations are
+best-effort — failures fall back silently to inline rendering.

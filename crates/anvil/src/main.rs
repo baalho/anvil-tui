@@ -6,6 +6,7 @@ mod interactive;
 mod ipc;
 pub mod render;
 mod watcher;
+pub mod zellij;
 
 use anvil_agent::{Agent, AgentEvent, McpManager, McpServerConfig, SessionStore};
 use anvil_config::{data_dir, load_settings, Settings};
@@ -107,7 +108,17 @@ enum Commands {
 #[derive(Subcommand)]
 enum DaemonAction {
     /// Start the daemon (runs in foreground — use nohup/systemd to background)
-    Start,
+    Start {
+        /// Also watch workspace for file changes
+        #[arg(long)]
+        watch: bool,
+        /// Glob patterns to ignore when watching (substring match)
+        #[arg(long)]
+        ignore: Vec<String>,
+        /// Debounce interval in seconds for file watching
+        #[arg(long, default_value = "2")]
+        debounce: u64,
+    },
     /// Stop the running daemon
     Stop,
     /// Show daemon status
@@ -138,7 +149,21 @@ async fn main() -> Result<()> {
         Some(Commands::History { limit, search }) => cmd_history(limit, search),
         Some(Commands::Watch { ignore, debounce }) => cmd_watch(&workspace, debounce, ignore).await,
         Some(Commands::Daemon { action }) => match action {
-            DaemonAction::Start => cmd_daemon_start(&workspace).await,
+            DaemonAction::Start {
+                watch,
+                ignore,
+                debounce,
+            } => {
+                let watch_opts = if watch {
+                    Some(DaemonWatchOpts {
+                        ignore_patterns: ignore,
+                        debounce_secs: debounce,
+                    })
+                } else {
+                    None
+                };
+                cmd_daemon_start(&workspace, watch_opts).await
+            }
             DaemonAction::Stop => client::daemon_stop(&workspace).await,
             DaemonAction::Status => client::daemon_status(&workspace).await,
         },
@@ -649,6 +674,11 @@ async fn cmd_run(
                     eprint!("{delta}");
                 }
             }
+            AgentEvent::ModelSwitched { from, to } => {
+                if !json_output {
+                    eprintln!("  [routing: {from} → {to}]");
+                }
+            }
             AgentEvent::Cancelled => {
                 if !json_output {
                     eprintln!("\n[cancelled]");
@@ -996,6 +1026,12 @@ async fn cmd_watch(workspace: &Path, debounce_secs: u64, ignore: Vec<String>) ->
     Ok(())
 }
 
+/// CLI-level watch options passed from `anvil daemon start --watch`.
+struct DaemonWatchOpts {
+    ignore_patterns: Vec<String>,
+    debounce_secs: u64,
+}
+
 /// Start the daemon server.
 ///
 /// Runs in the foreground. To background it, use standard Unix tools:
@@ -1006,7 +1042,7 @@ async fn cmd_watch(workspace: &Path, debounce_secs: u64, ignore: Vec<String>) ->
 ///
 /// This follows the "boring over clever" principle — we don't reinvent
 /// process supervision when the OS already provides it.
-async fn cmd_daemon_start(workspace: &Path) -> Result<()> {
+async fn cmd_daemon_start(workspace: &Path, watch_opts: Option<DaemonWatchOpts>) -> Result<()> {
     let mut settings = load_settings(workspace)?;
     auto_detect_model(&mut settings).await;
 
@@ -1028,7 +1064,13 @@ async fn cmd_daemon_start(workspace: &Path) -> Result<()> {
         agent.apply_model_profile(profile);
     }
 
-    daemon::run_daemon(agent).await
+    // Convert CLI watch options to the watcher's config format
+    let daemon_watch = watch_opts.map(|opts| daemon::DaemonWatchConfig {
+        ignore_patterns: opts.ignore_patterns,
+        debounce_secs: opts.debounce_secs,
+    });
+
+    daemon::run_daemon(agent, daemon_watch).await
 }
 
 /// Print a summary of the autonomous run result.

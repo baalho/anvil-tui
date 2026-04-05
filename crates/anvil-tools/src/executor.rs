@@ -81,6 +81,14 @@ impl ToolExecutor {
         self.write_ledger = Some(ledger);
     }
 
+    /// Get a clone of the write ledger, creating one if it doesn't exist.
+    pub fn write_ledger(&mut self) -> crate::ledger::WriteLedger {
+        if self.write_ledger.is_none() {
+            self.write_ledger = Some(crate::ledger::WriteLedger::new());
+        }
+        self.write_ledger.clone().unwrap()
+    }
+
     /// Get the permission handler for checking/granting tool permissions.
     pub fn permissions(&self) -> &PermissionHandler {
         &self.permissions
@@ -218,9 +226,21 @@ impl ToolExecutor {
                 }
                 tools::shell(&workspace, args, self.shell_timeout, &self.extra_env).await?
             }
-            "grep" => tools::grep(&workspace, args).await?,
-            "ls" => tools::ls(&workspace, args).await?,
-            "find" => tools::find(&workspace, args).await?,
+            "grep" => {
+                let text = tools::grep(&workspace, args).await?;
+                let truncated = truncation::truncate_output(&text, &self.truncation_config);
+                return Ok(build_table_output("grep", &truncated.content));
+            }
+            "ls" => {
+                let text = tools::ls(&workspace, args).await?;
+                let truncated = truncation::truncate_output(&text, &self.truncation_config);
+                return Ok(build_table_output("ls", &truncated.content));
+            }
+            "find" => {
+                let text = tools::find(&workspace, args).await?;
+                let truncated = truncation::truncate_output(&text, &self.truncation_config);
+                return Ok(build_table_output("find", &truncated.content));
+            }
             "git_status" => tools::git_status(&workspace, args).await?,
             "git_diff" => tools::git_diff(&workspace, args).await?,
             "git_log" => tools::git_log(&workspace, args).await?,
@@ -299,5 +319,132 @@ impl ToolExecutor {
         }
 
         Ok(())
+    }
+}
+
+/// Build a `ToolOutput::Structured` with `content_type: "table"` from
+/// line-oriented tool output. Parses ls/grep/find text into JSON rows.
+fn build_table_output(tool_name: &str, text: &str) -> crate::ToolOutput {
+    let rows: Vec<serde_json::Value> = match tool_name {
+        "ls" => text
+            .lines()
+            .filter(|l| !l.is_empty() && *l != "(empty directory)")
+            .map(|line| {
+                // Format: "dir   name/" or "file  name  (size)"
+                let parts: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
+                let kind = parts.first().copied().unwrap_or("").trim();
+                let rest = parts.get(1).copied().unwrap_or("").trim();
+                if kind == "dir" {
+                    serde_json::json!({"type": "dir", "name": rest, "size": ""})
+                } else {
+                    // "name  (size)"
+                    let (name, size) = rest
+                        .rsplit_once("  (")
+                        .map(|(n, s)| (n.trim(), s.trim_end_matches(')')))
+                        .unwrap_or((rest, ""));
+                    serde_json::json!({"type": "file", "name": name, "size": size})
+                }
+            })
+            .collect(),
+        "grep" => text
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|line| {
+                // Format: "file:line:text" or "file:line: text"
+                let mut parts = line.splitn(3, ':');
+                let file = parts.next().unwrap_or("");
+                let lineno = parts.next().unwrap_or("");
+                let content = parts.next().unwrap_or("").trim();
+                serde_json::json!({"file": file, "line": lineno, "text": content})
+            })
+            .collect(),
+        "find" => text
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|line| serde_json::json!({"path": line.trim()}))
+            .collect(),
+        _ => return crate::ToolOutput::Text(text.to_string()),
+    };
+
+    if rows.is_empty() {
+        return crate::ToolOutput::Text(text.to_string());
+    }
+
+    crate::ToolOutput::Structured {
+        text: text.to_string(),
+        data: serde_json::Value::Array(rows),
+        content_type: "table".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+
+    #[test]
+    fn build_table_output_ls() {
+        let text = "dir   src/\nfile  main.rs  (1.2K)";
+        let output = build_table_output("ls", text);
+        match output {
+            crate::ToolOutput::Structured {
+                content_type, data, ..
+            } => {
+                assert_eq!(content_type, "table");
+                let arr = data.as_array().unwrap();
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0]["type"], "dir");
+                assert_eq!(arr[1]["name"], "main.rs");
+                assert_eq!(arr[1]["size"], "1.2K");
+            }
+            _ => panic!("expected Structured"),
+        }
+    }
+
+    #[test]
+    fn build_table_output_grep() {
+        let text = "src/main.rs:10:fn main() {";
+        let output = build_table_output("grep", text);
+        match output {
+            crate::ToolOutput::Structured {
+                content_type, data, ..
+            } => {
+                assert_eq!(content_type, "table");
+                let arr = data.as_array().unwrap();
+                assert_eq!(arr.len(), 1);
+                assert_eq!(arr[0]["file"], "src/main.rs");
+                assert_eq!(arr[0]["line"], "10");
+                assert_eq!(arr[0]["text"], "fn main() {");
+            }
+            _ => panic!("expected Structured"),
+        }
+    }
+
+    #[test]
+    fn build_table_output_find() {
+        let text = "src/main.rs\nsrc/lib.rs";
+        let output = build_table_output("find", text);
+        match output {
+            crate::ToolOutput::Structured {
+                content_type, data, ..
+            } => {
+                assert_eq!(content_type, "table");
+                let arr = data.as_array().unwrap();
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0]["path"], "src/main.rs");
+            }
+            _ => panic!("expected Structured"),
+        }
+    }
+
+    #[test]
+    fn build_table_output_empty_returns_text() {
+        let output = build_table_output("ls", "(empty directory)");
+        assert!(matches!(output, crate::ToolOutput::Text(_)));
+    }
+
+    #[test]
+    fn build_table_output_unknown_tool_returns_text() {
+        let output = build_table_output("shell", "hello world");
+        assert!(matches!(output, crate::ToolOutput::Text(_)));
     }
 }

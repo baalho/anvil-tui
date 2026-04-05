@@ -63,6 +63,7 @@ pub enum Response {
         model: String,
         mode: String,
         uptime_secs: u64,
+        watching: bool,
         pid: u32,
     },
     /// Shutdown acknowledged — daemon is stopping.
@@ -213,6 +214,7 @@ mod tests {
             model: "qwen3".into(),
             mode: "coding".into(),
             uptime_secs: 42,
+            watching: true,
             pid: 1234,
         };
         let json = serde_json::to_vec(&resp).unwrap();

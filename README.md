@@ -1,7 +1,7 @@
 # Anvil
 
 A terminal coding agent forged in Rust. Connects to local models via Ollama,
-llama-server, or MLX. Runs offline. Works airgapped. Version 2.2.
+llama-server, or MLX. Runs offline. Works airgapped. Version 3.0.
 
 ## Install (macOS / Apple Silicon)
 

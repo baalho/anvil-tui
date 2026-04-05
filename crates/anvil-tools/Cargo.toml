@@ -1,6 +1,6 @@
 [package]
 name = "anvil-tools"
-version = "2.2.0"
+version = "3.0.0"
 description = "Core tools: file_read, file_write, file_edit, shell, grep with permission confirmation"
 edition.workspace = true
 license.workspace = true

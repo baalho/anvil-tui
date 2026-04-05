@@ -128,6 +128,7 @@ pub async fn daemon_status(workspace: &Path) -> Result<()> {
             model,
             mode,
             uptime_secs,
+            watching,
             pid,
         } => {
             let hours = uptime_secs / 3600;
@@ -139,6 +140,7 @@ pub async fn daemon_status(workspace: &Path) -> Result<()> {
             println!("  session: {}", &session_id[..8.min(session_id.len())]);
             println!("  model:   {model}");
             println!("  mode:    {mode}");
+            println!("  watching: {}", if watching { "yes" } else { "no" });
             println!("  uptime:  {hours}h {mins}m {secs}s");
             println!("  socket:  {}", ipc::socket_path(workspace).display());
         }

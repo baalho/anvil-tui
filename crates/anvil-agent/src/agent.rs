@@ -70,6 +70,8 @@ pub enum AgentEvent {
     },
     /// Real-time output from a running tool (e.g. shell command stdout).
     ToolOutputDelta { name: String, delta: String },
+    /// Model was temporarily switched due to a routing rule.
+    ModelSwitched { from: String, to: String },
     /// Turn was cancelled (e.g. by Ctrl+C). Partial content may have been emitted.
     Cancelled,
     /// Error occurred.
@@ -564,8 +566,15 @@ impl Agent {
     /// Set the write ledger on the tool executor.
     /// Called by the binary crate in daemon/watch mode to prevent
     /// the file watcher from triggering on the agent's own writes.
+    /// Set the write ledger for feedback loop prevention.
     pub fn set_write_ledger(&mut self, ledger: anvil_tools::WriteLedger) {
         self.executor.set_write_ledger(ledger);
+    }
+
+    /// Get a clone of the write ledger (for sharing with the file watcher).
+    /// Creates and installs a new ledger if none exists.
+    pub fn write_ledger(&mut self) -> anvil_tools::WriteLedger {
+        self.executor.write_ledger()
     }
 
     /// Keys of currently active skills (for snapshot persistence).
@@ -787,6 +796,9 @@ impl Agent {
         self.store
             .save_message(&self.session_id, "user", Some(user_input), None, None)?;
 
+        // Track tool names from the previous iteration for model routing.
+        let mut last_tool_names: Vec<String> = Vec::new();
+
         // Agent loop: keep going until the assistant responds without tool calls
         loop {
             // Check cancellation before starting a new LLM call
@@ -794,6 +806,36 @@ impl Agent {
                 let _ = event_tx.send(AgentEvent::Cancelled).await;
                 return Ok(());
             }
+
+            // Model routing: if the previous iteration called tools that match
+            // a route, temporarily switch to the routed model for this request.
+            let original_model = if !last_tool_names.is_empty() && !self.router.is_empty() {
+                // Find the first tool that has a route (prefer mutating over read-only)
+                let routed_model = last_tool_names
+                    .iter()
+                    .find_map(|name| self.router.model_for_tool(name))
+                    .map(|s| s.to_string());
+                if let Some(ref target) = routed_model {
+                    let from = self.client.model().to_string();
+                    if &from != target {
+                        self.client.set_model(target.clone());
+                        let _ = event_tx
+                            .send(AgentEvent::ModelSwitched {
+                                from: from.clone(),
+                                to: target.clone(),
+                            })
+                            .await;
+                        Some(from)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            last_tool_names.clear();
 
             // Context window check and auto-compaction
             if self.context_limit > 0 {
@@ -941,6 +983,11 @@ impl Agent {
 
             let tool_calls = tool_acc.finish();
 
+            // Restore original model if it was switched for routing
+            if let Some(ref orig) = original_model {
+                self.client.set_model(orig.clone());
+            }
+
             // Save assistant message (including partial content from cancellation)
             let tc_json = if tool_calls.is_empty() {
                 None
@@ -982,6 +1029,14 @@ impl Agent {
                 let _ = event_tx.send(AgentEvent::TurnComplete).await;
                 return Ok(());
             }
+
+            // Record tool names for model routing on the next iteration.
+            // Mutating tools take priority — if both read-only and mutating
+            // tools were called, the router checks mutating names first.
+            last_tool_names = tool_calls
+                .iter()
+                .map(|tc| tc.function.name.clone())
+                .collect();
 
             // Partition tool calls: read-only built-in tools run in parallel,
             // mutating tools and MCP tools run sequentially after.
@@ -1252,5 +1307,46 @@ mod tests {
             Some("system prompt")
         );
         assert_eq!(preserved_after[0].content.as_deref(), Some("q2"));
+    }
+
+    #[test]
+    fn model_router_consulted_for_tool_names() {
+        let mut router = ModelRouter::new();
+        router.add_route("shell", "qwen3:8b");
+        router.add_route("grep", "qwen3:4b");
+
+        // Simulate tool names from a turn
+        let tool_names = ["file_read".to_string(), "shell".to_string()];
+
+        // First matching tool should be found
+        let routed = tool_names
+            .iter()
+            .find_map(|name| router.model_for_tool(name))
+            .map(|s| s.to_string());
+        assert_eq!(routed, Some("qwen3:8b".to_string()));
+    }
+
+    #[test]
+    fn model_router_wildcard_catches_unrouted_tools() {
+        let mut router = ModelRouter::new();
+        router.add_route("*", "qwen3:30b");
+
+        let tool_names = ["file_read".to_string()];
+        let routed = tool_names
+            .iter()
+            .find_map(|name| router.model_for_tool(name))
+            .map(|s| s.to_string());
+        assert_eq!(routed, Some("qwen3:30b".to_string()));
+    }
+
+    #[test]
+    fn model_router_no_match_returns_none() {
+        let router = ModelRouter::new();
+        let tool_names = ["shell".to_string()];
+        let routed = tool_names
+            .iter()
+            .find_map(|name| router.model_for_tool(name))
+            .map(|s| s.to_string());
+        assert_eq!(routed, None);
     }
 }

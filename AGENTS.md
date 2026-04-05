@@ -12,7 +12,7 @@ Single source of truth for AI agents working in this codebase.
 - **Repo**: https://github.com/baalho/anvil-tui
 - **License**: Apache-2.0
 - **Rust**: edition 2021, MSRV 1.75
-- **Version**: 2.2.0
+- **Version**: 3.0.0
 - **Platforms**: macOS, Linux, Windows/WSL
 - **Default model**: `qwen3-coder:30b` (Ollama)
 
@@ -74,10 +74,19 @@ tokens, wall-clock time.
 Use small models for grep/ls, large models for code generation.
 
 **Renderer** (`render.rs`): Trait for output rendering. `TerminalRenderer`
-handles standard output. `KidsRenderer` wraps it with child-friendly
-messages (hides JSON, exit codes, file paths). `select_renderer()` picks
-the implementation based on kids mode. Future renderers add image display
-(Kitty/Sixel), web UI, etc.
+handles standard output with table formatting and Kitty image protocol.
+`KidsRenderer` wraps it with child-friendly messages (hides JSON, exit
+codes, file paths). `select_renderer()` picks the implementation based
+on kids mode and detects `TerminalCapabilities` automatically.
+
+**TerminalCapabilities** (`render.rs`): Detected at startup from env vars.
+Tracks Kitty graphics support (`$KITTY_WINDOW_ID`, `$TERM_PROGRAM`) and
+Zellij session (`$ZELLIJ`, `$ZELLIJ_SESSION_NAME`). Passed to renderers
+at construction.
+
+**ZellijPanes** (`zellij.rs`): Best-effort Zellij pane control via
+`zellij action` CLI. Opens floating panes for long tool output, diffs,
+and errors. Falls back silently when not inside Zellij.
 
 **TurnPolicy** (`interactive.rs`): Per-turn behavioral decisions derived
 from `Agent::is_kids_mode()`. Captures auto-approve, rate limiting, and
@@ -178,7 +187,10 @@ These prevent real bugs. Don't violate them.
 - **Per-profile base_url**: Different profiles can point to different backend servers. Kids on `:8081`, coding on `:8080`. `LaunchProfile.base_url` overrides `ProviderConfig.base_url`.
 - **Sandbox interpreters need file validation**: Allowing `python3` in the kids command allowlist isn't enough — `python3 -c "os.system('rm -rf /')"` bypasses it. Interpreters must run files within the sandbox workspace, not inline code.
 - **TurnPolicy over scattered booleans**: Per-turn behavioral decisions (auto-approve, rate limiting, renderer) belong in a `TurnPolicy` struct derived once from `Agent::is_kids_mode()`, not in `if is_kids` checks scattered through the loop. Adding a new policy dimension is one field, not a grep-and-patch.
-- **Zellij pane integration (future)**: Terminal output limitations (stack traces, multi-file diffs) would benefit from Zellij pane control — sending artifacts to split panes while keeping the chat loop clean. Not implemented; documented as a v3.0 direction.
+- **Zellij panes are best-effort**: `ZellijPanes` shells out to `zellij action` CLI. All operations silently fall back to inline rendering when not inside Zellij or when commands fail. Never crash over a display enhancement.
+- **Structured text, not structured tools**: `ToolOutput::Structured` is built in the executor by parsing existing tool text output, not by changing tool return types. Tools stay simple (`Result<String>`), the executor wraps the result. Adding structured output to a new tool is one match arm in `build_table_output`.
+- **Capabilities detection is env-var only**: No terminal escape sequence probing (DA1 queries are unreliable). `$KITTY_WINDOW_ID`, `$TERM_PROGRAM`, `$ZELLIJ` are sufficient. Add a config override (`[terminal] image_protocol`) for edge cases.
+- **Model routing restores after each request**: The routed model is temporary — set before the LLM call, restored immediately after. Sampling params from model profiles are NOT switched (the routed model uses the default sampling). This is intentional — routing is for capability, not tuning.
 
 ---
 
@@ -204,9 +216,10 @@ Before any change:
 | File | Purpose |
 |------|---------|
 | `crates/anvil/src/main.rs` | CLI entry, clap args, MCP init, Ralph Loop |
-| `crates/anvil/src/commands.rs` | 17 slash commands (including /mode, /selftest) |
+| `crates/anvil/src/commands.rs` | 18 slash commands (including /mode, /pane, /selftest) |
 | `crates/anvil/src/interactive.rs` | Readline loop, TurnPolicy, streaming display, status line |
-| `crates/anvil/src/render.rs` | Renderer trait, TerminalRenderer, KidsRenderer, select_renderer |
+| `crates/anvil/src/render.rs` | Renderer trait, TerminalRenderer, KidsRenderer, TerminalCapabilities, table/image rendering |
+| `crates/anvil/src/zellij.rs` | ZellijPanes — floating pane control via Zellij CLI |
 | `crates/anvil/src/backend.rs` | Optional managed backend process (start/stop/health-check) |
 | `crates/anvil/src/watcher.rs` | File watcher (notify crate), debounce, noise filtering |
 | `crates/anvil/src/ipc.rs` | IPC wire protocol: length-prefixed JSON, Request/Response enums |
@@ -246,13 +259,13 @@ Before any change:
 
 ## Test Inventory
 
-340 tests across all crates. Run with `cargo test`.
+~370 tests across all crates. Run with `cargo test`.
 
 | Crate | Tests | Notes |
 |-------|-------|-------|
-| `anvil` (binary) | 34 | IPC, daemon, watcher, renderer (incl. KidsRenderer), backend, commands |
-| `anvil-agent` | 136 | Agent loop, session store, events, dispatch, skills, personas, routing, memory, thinking. 3 env-dependent failures (devcontainer detection — pass on bare metal, fail inside containers) |
-| `anvil-tools` | 84 | 27 unit + 2 definition + 55 integration (tool execution, sandbox hardening) |
+| `anvil` (binary) | ~43 | IPC, daemon, watcher, renderer (tables, images, Kitty), Zellij panes, backend, commands |
+| `anvil-agent` | ~142 | Agent loop, session store, events, dispatch, skills (incl. search), personas, routing, memory, thinking. 3 env-dependent failures (devcontainer detection) |
+| `anvil-tools` | ~89 | 32 unit + 2 definition + 55 integration (tool execution, sandbox, structured output) |
 | `anvil-config` | 54 | Settings, profiles (incl. per-profile base_url), skills, layouts, inventory |
 | `anvil-llm` | 22 | 14 unit + 8 integration (streaming) |
 | `anvil-mcp` | 10 | Client, types, JSON-RPC |

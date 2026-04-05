@@ -585,8 +585,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                     *tool_use_counts.entry(name.clone()).or_insert(0) += 1;
 
                     let icon = tool_icon(&name);
-                    let text = result.text();
-                    policy.renderer.render_tool_result(&name, icon, text);
+                    policy.renderer.render_tool_output(&name, icon, &result);
                 }
                 AgentEvent::Usage(u) => {
                     cumulative_usage.prompt_tokens += u.prompt_tokens;
@@ -675,6 +674,11 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         Print(&delta),
                         ResetColor,
                     )?;
+                }
+                AgentEvent::ModelSwitched { from, to } => {
+                    policy
+                        .renderer
+                        .render_info(&format!("  [routing: {} → {}]", from, to));
                 }
                 AgentEvent::Error(e) => {
                     if needs_newline {
