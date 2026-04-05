@@ -8,6 +8,10 @@
 //! # v2.0 upgrade path
 //! Adding `Event::IpcPrompt` requires one new match arm that calls the same
 //! `agent.turn()`. Zero changes to this module.
+//!
+//! # `let _ = event_tx.send(...)` pattern
+//! Event channel sends use `let _ =` — the receiver may be dropped during
+//! shutdown. A failed send means no one is listening.
 
 use crate::agent::AgentEvent;
 use crate::event::Event;

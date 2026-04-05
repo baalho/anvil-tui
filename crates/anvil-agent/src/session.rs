@@ -248,10 +248,13 @@ impl SessionStore {
         // Index content for full-text search
         if let Some(text) = content {
             if !text.is_empty() {
-                let _ = self.conn.execute(
+                // FTS index is best-effort — failure doesn't affect core functionality
+                if let Err(e) = self.conn.execute(
                     "INSERT INTO messages_fts (session_id, role, content) VALUES (?1, ?2, ?3)",
                     params![session_id, role, text],
-                );
+                ) {
+                    tracing::debug!("FTS index insert failed: {e}");
+                }
             }
         }
 

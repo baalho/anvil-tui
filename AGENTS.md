@@ -12,7 +12,7 @@ Single source of truth for AI agents working in this codebase.
 - **Repo**: https://github.com/baalho/anvil-tui
 - **License**: Apache-2.0
 - **Rust**: edition 2021, MSRV 1.75
-- **Version**: 3.0.0
+- **Version**: 3.2.0
 - **Platforms**: macOS, Linux, Windows/WSL
 - **Default model**: `qwen3-coder:30b` (Ollama)
 
@@ -73,6 +73,26 @@ tokens, wall-clock time.
 **Model Routing** (`/route`): Route specific tools to different models.
 Use small models for grep/ls, large models for code generation.
 
+**Harness** (`harness.rs`): Multi-agent orchestrator for long-running tasks.
+Planner decomposes task into sprints, generator implements each sprint with
+a fresh context (context reset), evaluator grades against acceptance criteria.
+Agents communicate via structured files in `.anvil/harness/` (plan.md,
+handoff.md, eval.md, state.toml). Adapted from the Anthropic harness design
+for local LLMs on 64GB hardware.
+
+**RepoMap** (`repo_map.rs`): Regex-based workspace scanner. Extracts
+top-level symbols (functions, structs, classes) from source files. Summary
+injected into system prompt. `find_files_for_query()` enables auto-context —
+when the user mentions a symbol, the relevant file is included automatically.
+
+**ContextFiles** (`context.rs`): Overflow output system. When tool output
+exceeds 100 lines, full content is saved to `.anvil/context/<tool>-<timestamp>.txt`.
+Editor-agnostic alternative to terminal pane integration.
+
+**GuidedProjects** (`projects.rs`): Step-by-step project templates for kids.
+TOML definitions with prompts, hints, and verification commands. `/project`
+command manages lifecycle. 3 bundled projects.
+
 **Renderer** (`render.rs`): Trait for output rendering. `TerminalRenderer`
 handles standard output with table formatting and Kitty image protocol.
 `KidsRenderer` wraps it with child-friendly messages (hides JSON, exit
@@ -85,8 +105,8 @@ Zellij session (`$ZELLIJ`, `$ZELLIJ_SESSION_NAME`). Passed to renderers
 at construction.
 
 **ZellijPanes** (`zellij.rs`): Best-effort Zellij pane control via
-`zellij action` CLI. Opens floating panes for long tool output, diffs,
-and errors. Falls back silently when not inside Zellij.
+`zellij action` CLI. Used for `--zellij` layout launching. Falls back
+silently when not inside Zellij. Output overflow now handled by ContextFiles.
 
 **TurnPolicy** (`interactive.rs`): Per-turn behavioral decisions derived
 from `Agent::is_kids_mode()`. Captures auto-approve, rate limiting, and
@@ -118,14 +138,15 @@ the full agent state, not just messages. Bridge to v2.0 daemon resume.
 
 ```
 .anvil/
-├── config.toml          # Provider, agent, tool, MCP settings
+├── config.toml          # Provider, agent, tool, MCP, harness settings
 ├── context.md           # Injected into system prompt
 ├── inventory.toml       # Host/service registry (optional)
 ├── achievements.json    # Unlocked badges
 ├── models/              # Per-model sampling profiles (TOML)
 ├── skills/              # 22 bundled skills (Markdown + YAML frontmatter)
 ├── layouts/             # 3 bundled Zellij layouts (KDL)
-└── memory/              # Persistent learned patterns (categorized markdown)
+├── memory/              # Persistent learned patterns (categorized markdown)
+└── harness/             # Multi-agent harness artifacts (plan.md, handoff.md, eval.md, state.toml)
 ```
 
 ---
@@ -187,7 +208,7 @@ These prevent real bugs. Don't violate them.
 - **Per-profile base_url**: Different profiles can point to different backend servers. Kids on `:8081`, coding on `:8080`. `LaunchProfile.base_url` overrides `ProviderConfig.base_url`.
 - **Sandbox interpreters need file validation**: Allowing `python3` in the kids command allowlist isn't enough — `python3 -c "os.system('rm -rf /')"` bypasses it. Interpreters must run files within the sandbox workspace, not inline code.
 - **TurnPolicy over scattered booleans**: Per-turn behavioral decisions (auto-approve, rate limiting, renderer) belong in a `TurnPolicy` struct derived once from `Agent::is_kids_mode()`, not in `if is_kids` checks scattered through the loop. Adding a new policy dimension is one field, not a grep-and-patch.
-- **Zellij panes are best-effort**: `ZellijPanes` shells out to `zellij action` CLI. All operations silently fall back to inline rendering when not inside Zellij or when commands fail. Never crash over a display enhancement.
+- **Context files over pane integration**: Long tool output goes to `.anvil/context/` files accessible via `/context`. Editor-agnostic, works without Zellij or any terminal multiplexer.
 - **Structured text, not structured tools**: `ToolOutput::Structured` is built in the executor by parsing existing tool text output, not by changing tool return types. Tools stay simple (`Result<String>`), the executor wraps the result. Adding structured output to a new tool is one match arm in `build_table_output`.
 - **Capabilities detection is env-var only**: No terminal escape sequence probing (DA1 queries are unreliable). `$KITTY_WINDOW_ID`, `$TERM_PROGRAM`, `$ZELLIJ` are sufficient. Add a config override (`[terminal] image_protocol`) for edge cases.
 - **Model routing restores after each request**: The routed model is temporary — set before the LLM call, restored immediately after. Sampling params from model profiles are NOT switched (the routed model uses the default sampling). This is intentional — routing is for capability, not tuning.
@@ -216,6 +237,10 @@ Before any change:
 | File | Purpose |
 |------|---------|
 | `crates/anvil/src/main.rs` | CLI entry, clap args, MCP init, Ralph Loop |
+| `crates/anvil/src/display.rs` | Banners, spinners, session summary, formatting helpers |
+| `crates/anvil/src/prompts.rs` | User input reading, permission prompting |
+| `crates/anvil/src/ralph.rs` | Autonomous verify-fix loop (extracted from interactive.rs) |
+| `crates/anvil/src/context.rs` | Context file overflow system (.anvil/context/) |
 | `crates/anvil/src/commands.rs` | 18 slash commands (including /mode, /pane, /selftest) |
 | `crates/anvil/src/interactive.rs` | Readline loop, TurnPolicy, streaming display, status line |
 | `crates/anvil/src/render.rs` | Renderer trait, TerminalRenderer, KidsRenderer, TerminalCapabilities, table/image rendering |
@@ -237,6 +262,9 @@ Before any change:
 | `crates/anvil-agent/src/session.rs` | SessionStore (SQLite), SessionSnapshot, migrations 001–003 |
 | `crates/anvil-agent/src/routing.rs` | Model routing — route specific tools to different models |
 | `crates/anvil-agent/src/memory.rs` | Persistent learned patterns (categorized markdown in `.anvil/memory/`) |
+| `crates/anvil-agent/src/repo_map.rs` | Workspace file/symbol index, auto-context for prompts |
+| `crates/anvil-agent/src/projects.rs` | Guided project templates for kids mode |
+| `crates/anvil-agent/src/harness.rs` | Multi-agent harness: planner/generator/evaluator orchestrator |
 | `crates/anvil-agent/src/thinking.rs` | ThinkingFilter — parse `<thinking>` blocks from streaming output |
 | `crates/anvil-agent/src/json_filter.rs` | Extract JSON from model output (handles persona bleed) |
 | `crates/anvil-config/src/profiles.rs` | 12 model profiles with capability tags and KV cache config |
@@ -259,13 +287,13 @@ Before any change:
 
 ## Test Inventory
 
-~370 tests across all crates. Run with `cargo test`.
+428 tests across all crates. Run with `cargo test`.
 
 | Crate | Tests | Notes |
 |-------|-------|-------|
-| `anvil` (binary) | ~43 | IPC, daemon, watcher, renderer (tables, images, Kitty), Zellij panes, backend, commands |
-| `anvil-agent` | ~142 | Agent loop, session store, events, dispatch, skills (incl. search), personas, routing, memory, thinking. 3 env-dependent failures (devcontainer detection) |
-| `anvil-tools` | ~89 | 32 unit + 2 definition + 55 integration (tool execution, sandbox, structured output) |
+| `anvil` (binary) | 50 | IPC, daemon, watcher, renderer (tables, images, Kitty), context files, backend, commands |
+| `anvil-agent` | 200 | Agent loop, session store, events, dispatch, skills, personas, routing, memory, thinking, repo map, projects, harness (46 tests). 2 env-dependent failures (devcontainer detection) |
+| `anvil-tools` | 92 | 32 unit + 2 definition + 58 integration (tool execution, sandbox hardening, structured output) |
 | `anvil-config` | 54 | Settings, profiles (incl. per-profile base_url), skills, layouts, inventory |
 | `anvil-llm` | 22 | 14 unit + 8 integration (streaming) |
 | `anvil-mcp` | 10 | Client, types, JSON-RPC |
@@ -275,4 +303,15 @@ Before any change:
 1. Ollama defaults to 2048 context — set `OLLAMA_NUM_CTX` or use model profile
 2. MLX tool calling varies by model — `tool_choice` auto-stripped on 400/422
 3. GLM-4.7-Flash has chat template bugs on Ollama — use llama-server with `--jinja`
-4. 3 tests in `anvil-agent` fail inside devcontainers (`.dockerenv` detected before other signals) — pass on bare metal
+4. 2 tests in `anvil-agent` fail inside devcontainers (`.dockerenv` detected before other signals) — pass on bare metal
+
+---
+
+## 5b. Harness Lessons Learned
+
+- **Context resets over compaction for long tasks**: Drop the agent and pass structured handoff files. Fresh context beats summarized context, especially on small models where summary quality is low.
+- **Planner doesn't need tools**: Pure text generation for task decomposition. Saves ~1K tokens of tool definitions in the context window.
+- **Evaluator can use a smaller model**: It reads code and runs commands, doesn't generate code. An 8B model is sufficient for grading.
+- **Structured artifacts over conversation history**: Files in `.anvil/harness/` carry state between agents. No shared context window.
+- **Graceful fallback is mandatory for local models**: Every parsing step (plan, handoff, eval verdict) must handle unstructured output. Small models don't reliably follow format instructions.
+- **Auto-approve in harness agents**: Like Ralph, harness agents auto-approve all tool calls. The user approved the task when they ran `/harness`.

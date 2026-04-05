@@ -131,13 +131,25 @@ impl ToolExecutor {
     /// Check if a shell command is allowed under the current sandbox.
     /// Returns Ok(()) if allowed, Err with friendly message if blocked.
     ///
-    /// Two layers of validation:
-    /// 1. Command allowlist — only permitted binaries can run.
-    /// 2. Script interpreters (python3, python, node) must reference a file
+    /// Three layers of validation:
+    /// 1. Shell metacharacter rejection — blocks `;`, `|`, `&`, backticks,
+    ///    `$()`, `>`, `<` to prevent argument injection via `sh -c`.
+    /// 2. Command allowlist — only permitted binaries can run.
+    /// 3. Script interpreters (python3, python, node) must reference a file
     ///    within the sandbox workspace — no `-c`/`-e` inline code execution.
     fn check_shell_allowlist(&self, command: &str) -> Result<()> {
         let sandbox = self.kids_sandbox.lock().unwrap();
         if let Some(sandbox) = sandbox.as_ref() {
+            // Layer 1: Reject shell metacharacters that enable injection
+            const DANGEROUS_CHARS: &[char] = &[';', '|', '&', '`', '>', '<'];
+            if command.chars().any(|c| DANGEROUS_CHARS.contains(&c)) || command.contains("$(") {
+                bail!(
+                    "✨ That command has special characters that aren't allowed \
+                     in kids mode! Try a simpler command."
+                );
+            }
+
+            // Layer 2: Command allowlist
             let words: Vec<&str> = command.split_whitespace().collect();
             let first_word = words.first().copied().unwrap_or("");
             // Strip path prefix (e.g., /usr/bin/python3 -> python3)
@@ -149,7 +161,9 @@ impl ToolExecutor {
                 );
             }
 
-            // Script interpreters must run files, not inline code.
+            // Layer 3: Script interpreters must run files, not inline code.
+            // Bare interpreter (e.g. `python3` with no args) reads stdin,
+            // which allows the model to inject code via heredocs.
             const INTERPRETERS: &[&str] = &["python3", "python", "node"];
             if INTERPRETERS.contains(&binary) {
                 // Block -c / -e flags (inline code execution)
@@ -165,23 +179,30 @@ impl ToolExecutor {
                         );
                     }
                 }
-                // If there's a file argument, verify it's within the sandbox workspace
-                if let Some(file_arg) = words.get(1) {
-                    if !file_arg.starts_with('-') {
-                        let file_path = if std::path::Path::new(file_arg).is_absolute() {
-                            std::path::PathBuf::from(file_arg)
-                        } else {
-                            sandbox.workspace.join(file_arg)
-                        };
-                        let canonical_ws = sandbox
-                            .workspace
-                            .canonicalize()
-                            .unwrap_or_else(|_| sandbox.workspace.clone());
-                        let canonical_file = file_path.canonicalize().unwrap_or(file_path);
-                        if !canonical_file.starts_with(&canonical_ws) {
-                            bail!("✨ In kids mode, scripts must be in your project folder!");
-                        }
-                    }
+                // Require a file argument — bare interpreter reads stdin
+                let file_arg = words.get(1).filter(|a| !a.starts_with('-'));
+                if file_arg.is_none() {
+                    bail!(
+                        "✨ In kids mode, {} needs a script file to run! \
+                         Try: {} your_script.py",
+                        binary,
+                        binary
+                    );
+                }
+                // Verify the file is within the sandbox workspace
+                let file_arg = file_arg.unwrap();
+                let file_path = if std::path::Path::new(file_arg).is_absolute() {
+                    std::path::PathBuf::from(file_arg)
+                } else {
+                    sandbox.workspace.join(file_arg)
+                };
+                let canonical_ws = sandbox
+                    .workspace
+                    .canonicalize()
+                    .unwrap_or_else(|_| sandbox.workspace.clone());
+                let canonical_file = file_path.canonicalize().unwrap_or(file_path);
+                if !canonical_file.starts_with(&canonical_ws) {
+                    bail!("✨ In kids mode, scripts must be in your project folder!");
                 }
             }
         }

@@ -1,7 +1,11 @@
 //! Interactive readline loop — the primary user interface for Anvil.
 //!
-//! Handles prompt input, streaming LLM output display, status line updates,
-//! slash command dispatch, and achievement notifications.
+//! This module is the orchestrator. It owns the main loop and delegates:
+//! - Display (banners, spinners, formatting) → `display.rs`
+//! - User input and permission prompts → `prompts.rs`
+//! - Autonomous mode (ralph loop) → `ralph.rs`
+//! - Slash commands → `commands.rs`
+//! - Rendering (tool output, errors) → `render.rs`
 //!
 //! # TurnPolicy
 //! Per-turn behavioral decisions (auto-approve, rate limiting, renderer)
@@ -9,22 +13,22 @@
 //! checks. The policy is derived from `Agent::is_kids_mode()` at the
 //! start of each loop iteration and threaded through the turn.
 
-use anvil_agent::{
-    AchievementStore, Agent, AgentEvent, AutonomousConfig, AutonomousRunner, IterationResult,
-    SessionTracker,
-};
+use anvil_agent::{AchievementStore, Agent, AgentEvent, SessionTracker};
 use anvil_llm::TokenUsage;
 use anvil_tools::PermissionDecision;
 use anyhow::Result;
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::{execute, terminal};
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::commands::{self, CommandResult};
+use crate::display;
+use crate::prompts;
+use crate::ralph;
 use crate::render::{self, Renderer};
 
 /// Per-turn behavioral policy derived from `Agent::is_kids_mode()`.
@@ -41,27 +45,25 @@ struct TurnPolicy {
     auto_approve: bool,
     /// Enforce a cooldown between user messages.
     rate_limit: bool,
-    /// The renderer for this turn's output.
+    /// Renderer for this turn (kids vs standard).
     renderer: Box<dyn Renderer>,
 }
 
 impl TurnPolicy {
-    /// Derive the policy from the current agent state.
     fn from_agent(agent: &Agent) -> Self {
-        let is_kids = agent.is_kids_mode();
+        let kids = agent.is_kids_mode();
         Self {
-            auto_approve: is_kids,
-            rate_limit: is_kids,
-            renderer: render::select_renderer(is_kids),
+            auto_approve: kids,
+            rate_limit: kids,
+            renderer: render::select_renderer(kids),
         }
     }
 
-    /// Decide whether to allow a tool call or prompt the user.
     fn permission_decision(&self, tool_name: &str, arguments: &str) -> Result<PermissionDecision> {
         if self.auto_approve {
             Ok(PermissionDecision::Allow)
         } else {
-            prompt_permission(tool_name, arguments)
+            prompts::prompt_permission(tool_name, arguments)
         }
     }
 }
@@ -74,24 +76,20 @@ struct CtrlCState {
 }
 
 pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> Result<()> {
-    // Detect first run — no .anvil/ directory means brand new user
     let is_first_run = !agent.workspace().join(".anvil").exists();
 
-    print_banner(&agent);
-
-    // Show available models hint (async discovery)
-    print_model_hint(&agent).await;
-
+    // ── Startup display ──────────────────────────────────────────────
+    display::print_banner(&agent);
+    display::print_model_hint(&agent).await;
     if is_first_run {
-        print_first_run_welcome();
+        display::print_first_run_welcome();
     }
-
     if let Some(summary) = session_summary {
         println!("{summary}");
         println!();
     }
 
-    // Reassigned per-turn based on persona (kids vs standard).
+    // ── Session state ────────────────────────────────────────────────
     #[allow(unused_assignments)]
     let mut policy = TurnPolicy::from_agent(&agent);
     let stdin = io::stdin();
@@ -101,14 +99,12 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
     let mut last_message_time: Option<std::time::Instant> = None;
     let mut agent_slot: Option<Agent> = Some(agent);
     let mut managed_backend: Option<crate::backend::BackendProcess> = None;
-    // Session stats for exit summary
     let session_start = std::time::Instant::now();
     let mut files_created: Vec<String> = Vec::new();
     let mut tool_use_counts: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
 
-    // Store conversation starters so numeric input (1/2/3) can select them.
-    // Populated from the persona's suggestion pool shown in the banner.
+    // Conversation starters — numeric input (1/2/3) selects them.
     let mut active_suggestions: Vec<String> = {
         let agent_ref = agent_slot.as_ref().expect("agent lost");
         if let Some(persona) = agent_ref.persona() {
@@ -118,21 +114,17 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         }
     };
 
-    // Shared state for Ctrl+C handling
+    // ── Ctrl+C handling ──────────────────────────────────────────────
     let ctrlc_state = Arc::new(CtrlCState {
         pending: AtomicBool::new(false),
     });
-    // The active cancellation token for the current turn (if any).
-    // Wrapped in Arc<Mutex> so the ctrlc handler can access it.
     let active_cancel: Arc<std::sync::Mutex<Option<CancellationToken>>> =
         Arc::new(std::sync::Mutex::new(None));
 
-    // Set up Ctrl+C handler
     {
         let ctrlc_state = ctrlc_state.clone();
         let active_cancel = active_cancel.clone();
         ctrlc::set_handler(move || {
-            // If there's an active turn, cancel it
             if let Ok(guard) = active_cancel.lock() {
                 if let Some(token) = guard.as_ref() {
                     if !token.is_cancelled() {
@@ -142,106 +134,30 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                     }
                 }
             }
-            // Double Ctrl+C or no active turn — exit immediately
             if ctrlc_state.pending.load(Ordering::SeqCst) {
-                // Ensure terminal is in a sane state before exit
                 let _ = terminal::disable_raw_mode();
                 eprintln!("\nexiting");
                 std::process::exit(130);
             }
-            // No active turn — just exit
             let _ = terminal::disable_raw_mode();
             eprintln!("\nexiting");
             std::process::exit(130);
         })?;
     }
 
+    // ── Main loop ────────────────────────────────────────────────────
     loop {
         let agent = agent_slot.as_mut().expect("agent lost");
-
-        // Reset Ctrl+C state between turns
         ctrlc_state.pending.store(false, Ordering::SeqCst);
 
-        // Build status prefix: [persona?|mode|model] icon
-        let mode_icon = match agent.mode() {
-            anvil_agent::Mode::Coding => "⚒",
-            anvil_agent::Mode::Creative => "✨",
-        };
-        // Override icon if persona is active
-        let icon = match agent.persona().map(|p| p.key.as_str()) {
-            Some("sparkle") => "🦄",
-            Some("bolt") => "🤖",
-            Some("codebeard") => "🏴\u{200d}☠\u{fe0f}",
-            _ => mode_icon,
-        };
-        // Shorten model name for display (strip :latest, truncate long names)
-        let model_short = agent
-            .model()
-            .strip_suffix(":latest")
-            .unwrap_or(agent.model());
-        let persona = agent.persona();
+        // ── Prompt line ──────────────────────────────────────────────
         policy = TurnPolicy::from_agent(agent);
-
-        let status = policy.renderer.format_status(
-            &agent.mode().to_string(),
-            model_short,
-            persona.as_ref().map(|p| p.key.as_str()),
-        );
-
-        // Show token usage in prompt when context is >50% full
-        let context_window = agent.context_limit() as u64;
-        let used_tokens = cumulative_usage.total_tokens;
-        let usage_pct = if context_window > 0 {
-            (used_tokens * 100) / context_window
-        } else {
-            0
-        };
-
-        if usage_pct > 80 {
-            execute!(
-                io::stdout(),
-                SetForegroundColor(Color::DarkGrey),
-                Print(&status),
-                Print(" "),
-                SetForegroundColor(Color::Yellow),
-                Print(format!(
-                    "[{}/{}k ⚠] ",
-                    format_token_count(used_tokens),
-                    context_window / 1000
-                )),
-                SetForegroundColor(Color::Green),
-                Print(format!("{icon} ▸ ")),
-                ResetColor,
-            )?;
-        } else if usage_pct > 50 {
-            execute!(
-                io::stdout(),
-                SetForegroundColor(Color::DarkGrey),
-                Print(&status),
-                Print(" "),
-                SetForegroundColor(Color::Green),
-                Print(format!(
-                    "[{}/{}k] ",
-                    format_token_count(used_tokens),
-                    context_window / 1000
-                )),
-                Print(format!("{icon} ▸ ")),
-                ResetColor,
-            )?;
-        } else {
-            execute!(
-                io::stdout(),
-                SetForegroundColor(Color::DarkGrey),
-                Print(&status),
-                Print(" "),
-                SetForegroundColor(Color::Green),
-                Print(format!("{icon} ▸ ")),
-                ResetColor,
-            )?;
-        }
+        let prompt_line = build_prompt_line(agent, &policy, &cumulative_usage);
+        execute!(io::stdout(), Print(&prompt_line), ResetColor)?;
         io::stdout().flush()?;
 
-        let input = match read_input(&stdin) {
+        // ── Read input ───────────────────────────────────────────────
+        let input = match prompts::read_input(&stdin) {
             Some(input) => input,
             None => break,
         };
@@ -252,35 +168,13 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         }
 
         // Handle numeric input as suggestion selection (1/2/3)
-        let trimmed = if !active_suggestions.is_empty() {
-            if let Ok(n) = trimmed.parse::<usize>() {
-                if n >= 1 && n <= active_suggestions.len() {
-                    let suggestion = active_suggestions[n - 1].clone();
-                    println!("  → {suggestion}");
-                    // Clear suggestions after first use
-                    active_suggestions.clear();
-                    // Use a leaked string to get a &str with the right lifetime.
-                    // This is fine — it happens at most once per session.
-                    Box::leak(suggestion.into_boxed_str()) as &str
-                } else {
-                    trimmed
-                }
-            } else {
-                // Any non-numeric input clears suggestions
-                active_suggestions.clear();
-                trimmed
-            }
-        } else {
-            trimmed
-        };
+        let trimmed = resolve_suggestion(trimmed, &mut active_suggestions);
 
-        // Rate-limit user messages when kids mode is active.
-        // Slash commands bypass the cooldown so /help always works.
+        // Rate-limit user messages in kids mode
         if !trimmed.starts_with('/') && policy.rate_limit {
             if let Some(last) = last_message_time {
                 const KIDS_INPUT_COOLDOWN_SECS: u64 = 2;
-                let elapsed = last.elapsed();
-                if elapsed.as_secs() < KIDS_INPUT_COOLDOWN_SECS {
+                if last.elapsed().as_secs() < KIDS_INPUT_COOLDOWN_SECS {
                     let persona_name = agent
                         .persona()
                         .map(|p| p.name.clone())
@@ -298,152 +192,26 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
             }
         }
 
+        // ── Slash commands ───────────────────────────────────────────
         if trimmed.starts_with('/') {
-            match commands::handle_command(trimmed, agent, &cumulative_usage).await {
-                CommandResult::Handled(output) => {
-                    if !output.is_empty() {
-                        policy.renderer.render_command_result(&output);
-                    }
-                    continue;
-                }
-                CommandResult::Compact => {
-                    policy.renderer.render_info("  [compacting context...]");
-
-                    let cancel = CancellationToken::new();
-                    let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(64);
-
-                    let mut moved_agent = agent_slot.take().unwrap();
-                    let compact_handle = tokio::spawn(async move {
-                        let result = moved_agent.compact(4, &event_tx, cancel).await;
-                        (moved_agent, result)
-                    });
-
-                    match compact_handle.await {
-                        Ok((returned_agent, Ok(result))) => {
-                            agent_slot = Some(returned_agent);
-                            if result.messages_removed == 0 {
-                                policy.renderer.render_info("  [nothing to compact]");
-                            } else {
-                                policy.renderer.render_info(&format!(
-                                    "  [compacted: {} messages removed, ~{} → ~{} tokens]",
-                                    result.messages_removed,
-                                    result.before_tokens,
-                                    result.after_tokens,
-                                ));
-                            }
-                        }
-                        Ok((returned_agent, Err(e))) => {
-                            agent_slot = Some(returned_agent);
-                            policy
-                                .renderer
-                                .render_error(&format!("compaction failed: {e}"));
-                        }
-                        Err(e) => {
-                            return Err(anyhow::anyhow!("compaction task panicked: {e}"));
-                        }
-                    }
-                    continue;
-                }
-                CommandResult::BackendStart(args) => {
-                    // Stop existing managed backend if any
-                    if let Some(ref mut bp) = managed_backend {
-                        bp.stop();
-                        managed_backend = None;
-                    }
-
-                    match args.backend_type.as_str() {
-                        "llama" | "llama-server" => {
-                            match crate::backend::BackendProcess::start_llama_server(
-                                &args.model_path,
-                                args.port,
-                                &[],
-                            )
-                            .await
-                            {
-                                Ok(bp) => {
-                                    let url = bp.base_url().to_string();
-                                    agent.set_backend(
-                                        anvil_config::BackendKind::LlamaServer,
-                                        url.clone(),
-                                    );
-                                    execute!(
-                                        io::stdout(),
-                                        SetForegroundColor(Color::Green),
-                                        Print(format!("backend started: llama-server at {url}\n")),
-                                        ResetColor,
-                                    )?;
-                                    managed_backend = Some(bp);
-                                }
-                                Err(e) => {
-                                    execute!(
-                                        io::stdout(),
-                                        SetForegroundColor(Color::Red),
-                                        Print(format!("failed to start backend: {e}\n")),
-                                        ResetColor,
-                                    )?;
-                                }
-                            }
-                        }
-                        other => {
-                            execute!(
-                                io::stdout(),
-                                SetForegroundColor(Color::Red),
-                                Print(format!(
-                                    "managed start not supported for '{other}'. Use: llama\n"
-                                )),
-                                ResetColor,
-                            )?;
-                        }
-                    }
-                    continue;
-                }
-                CommandResult::BackendStop => {
-                    if let Some(ref mut bp) = managed_backend {
-                        bp.stop();
-                        managed_backend = None;
-                        execute!(
-                            io::stdout(),
-                            SetForegroundColor(Color::Green),
-                            Print("backend stopped\n"),
-                            ResetColor,
-                        )?;
-                    } else {
-                        println!("no managed backend running");
-                    }
-                    continue;
-                }
-                CommandResult::Ralph(args) => {
-                    let mut moved_agent = agent_slot.take().unwrap();
-                    let ctrlc_state_clone = ctrlc_state.clone();
-                    let active_cancel_clone = active_cancel.clone();
-                    let result = run_ralph_loop(
-                        &mut moved_agent,
-                        &args,
-                        &mut cumulative_usage,
-                        &ctrlc_state_clone,
-                        &active_cancel_clone,
-                    )
-                    .await;
-                    agent_slot = Some(moved_agent);
-                    if let Err(e) = result {
-                        execute!(
-                            io::stdout(),
-                            SetForegroundColor(Color::Red),
-                            Print(format!("ralph error: {e}\n")),
-                            ResetColor,
-                        )?;
-                    }
-                    continue;
-                }
-                CommandResult::Exit => break,
-                CommandResult::Unknown(cmd) => {
-                    eprintln!("unknown command: {cmd} — try /help");
-                    continue;
-                }
+            let cmd_result = handle_slash_command(
+                trimmed,
+                &mut agent_slot,
+                &mut policy,
+                &mut cumulative_usage,
+                &mut managed_backend,
+                &ctrlc_state,
+                &active_cancel,
+            )
+            .await?;
+            match cmd_result {
+                SlashResult::Continue => continue,
+                SlashResult::Break => break,
+                SlashResult::Panicked(e) => return Err(e),
             }
         }
 
-        // Create a cancellation token for this turn
+        // ── Agent turn ───────────────────────────────────────────────
         let cancel = CancellationToken::new();
         {
             let mut guard = active_cancel.lock().unwrap();
@@ -453,7 +221,6 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(64);
         let (perm_tx, perm_rx) = mpsc::channel::<PermissionDecision>(1);
 
-        // Track user message for achievements and rate limiting
         last_message_time = Some(std::time::Instant::now());
         let mut pending_triggers: Vec<&'static str> = Vec::new();
         pending_triggers.extend(session_tracker.record_message());
@@ -468,51 +235,17 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
             (moved_agent, result)
         });
 
-        // Spinner with elapsed time while waiting for first LLM token
+        // ── Spinner ──────────────────────────────────────────────────
         let spinner_cancel = CancellationToken::new();
-        let spinner_cancel_clone = spinner_cancel.clone();
-        let spinner_handle = tokio::spawn(async move {
-            const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let start = std::time::Instant::now();
-            let mut i = 0;
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(80));
-            loop {
-                tokio::select! {
-                    _ = spinner_cancel_clone.cancelled() => break,
-                    _ = interval.tick() => {
-                        let frame = FRAMES[i % FRAMES.len()];
-                        let elapsed = start.elapsed().as_secs();
-                        let timer = if elapsed > 0 {
-                            format!(" ({elapsed}s)")
-                        } else {
-                            String::new()
-                        };
-                        let _ = execute!(
-                            io::stdout(),
-                            crossterm::cursor::MoveToColumn(0),
-                            crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
-                            SetForegroundColor(Color::DarkGrey),
-                            Print(format!("  {frame} thinking...{timer}")),
-                            ResetColor,
-                        );
-                        let _ = io::stdout().flush();
-                        i += 1;
-                    }
-                }
-            }
-            // Clear spinner line
-            let _ = execute!(
-                io::stdout(),
-                crossterm::cursor::MoveToColumn(0),
-                crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
-            );
-        });
+        let spinner_handle = display::spawn_spinner(spinner_cancel.clone());
 
+        // ── Event processing ─────────────────────────────────────────
         let mut needs_newline = false;
         let mut spinner_stopped = false;
         let mut spinner_handle = Some(spinner_handle);
         let mut in_thinking_block = false;
         let mut turn_complete_fired = false;
+
         while let Some(event) = event_rx.recv().await {
             // Stop spinner on first event
             if !spinner_stopped {
@@ -559,13 +292,12 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         needs_newline = false;
                     }
 
-                    let icon = tool_icon(&name);
-                    let short_args = truncate_display(&arguments, 80);
+                    let icon = display::tool_icon(&name);
+                    let short_args = display::truncate_display(&arguments, 80);
                     policy
                         .renderer
                         .render_tool_pending(&name, icon, &short_args);
 
-                    // Track files created for session summary
                     if name == "file_write" {
                         if let Ok(args) = serde_json::from_str::<serde_json::Value>(&arguments) {
                             if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
@@ -574,17 +306,14 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         }
                     }
 
-                    // Track tool usage for achievements
                     pending_triggers.extend(session_tracker.record_tool_call(&name, &arguments));
 
                     let decision = policy.permission_decision(&name, &arguments)?;
                     let _ = perm_tx.send(decision).await;
                 }
                 AgentEvent::ToolResult { name, result } => {
-                    // Track tool usage for session summary
                     *tool_use_counts.entry(name.clone()).or_insert(0) += 1;
-
-                    let icon = tool_icon(&name);
+                    let icon = display::tool_icon(&name);
                     policy.renderer.render_tool_output(&name, icon, &result);
                 }
                 AgentEvent::Usage(u) => {
@@ -597,9 +326,6 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         println!();
                         needs_newline = false;
                     }
-                    // Signal that achievements should fire after agent is returned.
-                    // We cannot access agent_slot here — it is None while the agent
-                    // is inside the spawned task. Defer to after turn_handle.await.
                     turn_complete_fired = true;
                     println!();
                 }
@@ -667,7 +393,6 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                     )?;
                 }
                 AgentEvent::ToolOutputDelta { delta, .. } => {
-                    // Stream tool output to terminal in real-time
                     execute!(
                         io::stdout(),
                         SetForegroundColor(Color::DarkGrey),
@@ -690,7 +415,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
             }
         }
 
-        // Clear the active cancel token
+        // ── Post-turn ────────────────────────────────────────────────
         {
             let mut guard = active_cancel.lock().unwrap();
             *guard = None;
@@ -700,7 +425,6 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
             Ok((returned_agent, result)) => {
                 agent_slot = Some(returned_agent);
 
-                // Process achievements now that the agent is back in agent_slot
                 if turn_complete_fired {
                     if let Some(agent) = agent_slot.as_ref() {
                         let persona = agent.persona().map(|p| p.key.as_str());
@@ -726,6 +450,25 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
                         ResetColor,
                     )?;
                 }
+
+                // Warn about uncommitted changes after file-modifying turns
+                if !files_created.is_empty() {
+                    if let Some(agent) = agent_slot.as_ref() {
+                        if let Ok(status) = crate::commands::check_uncommitted(agent.workspace()) {
+                            if status.changed_files >= 10 {
+                                execute!(
+                                    io::stdout(),
+                                    SetForegroundColor(Color::DarkYellow),
+                                    Print(format!(
+                                        "  [⚠ {} uncommitted changes across {} files — consider /commit]\n",
+                                        status.changed_files, status.unique_files
+                                    )),
+                                    ResetColor,
+                                )?;
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => {
                 return Err(anyhow::anyhow!("agent task panicked: {e}"));
@@ -733,13 +476,11 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
         }
     }
 
-    // Stop managed backend if running
+    // ── Shutdown ─────────────────────────────────────────────────────
     if let Some(ref mut bp) = managed_backend {
         bp.stop();
     }
 
-    // Rebuild policy from final agent state for the session summary.
-    // The persona may have changed mid-session via /persona.
     let final_policy = agent_slot
         .as_ref()
         .map(TurnPolicy::from_agent)
@@ -748,7 +489,7 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
             rate_limit: false,
             renderer: render::select_renderer(false),
         });
-    print_session_summary(
+    display::print_session_summary(
         session_start.elapsed(),
         &cumulative_usage,
         &tool_use_counts,
@@ -764,545 +505,259 @@ pub async fn run_interactive(agent: Agent, session_summary: Option<String>) -> R
     Ok(())
 }
 
-fn print_banner(agent: &Agent) {
-    if let Some(persona) = agent.persona() {
-        // Persona-themed banner
-        let (border, icon) = match persona.key.as_str() {
-            "sparkle" => ("✨", "🦄"),
-            "bolt" => ("⚡", "🤖"),
-            "codebeard" => ("⚓", "🏴‍☠️"),
-            _ => ("─", "🔨"),
-        };
-        println!(
-            "{border}{border}{border} {icon} {} {border}{border}{border}",
-            persona.name
-        );
-        println!();
-        println!("  {}", persona.greeting);
-        println!();
+// ── Helper functions ─────────────────────────────────────────────────
 
-        // Show conversation starters for kids personas
-        let suggestions = anvil_agent::random_suggestions(persona, 3);
-        if !suggestions.is_empty() {
-            println!("  Try saying:");
-            for (i, s) in suggestions.iter().enumerate() {
-                println!("    {}. \"{}\"", i + 1, s);
-            }
-            println!();
-        }
-
-        println!("  model:   {}", agent.model());
-        println!("  session: {}", &agent.session_id()[..8]);
-        println!("  type /help for commands");
-        println!();
-    } else {
-        println!("╭─────────────────────────────────────╮");
-        println!("│  ⚒  Anvil v{:<25}│", env!("CARGO_PKG_VERSION"));
-        println!("│  local coding agent                 │");
-        println!("╰─────────────────────────────────────╯");
-        println!("  model:   {}", agent.model());
-        println!("  mode:    {}", agent.mode());
-        // Show KV cache info if a TQ profile is matched
-        let profiles = anvil_config::load_bundled_profiles();
-        if let Some(profile) = anvil_config::find_matching_profile(&profiles, agent.model()) {
-            if let Some(ref kv) = profile.kv_cache {
-                println!(
-                    "  kv cache: K={} V={} | ctx: {}",
-                    kv.type_k, kv.type_v, kv.recommended_context
-                );
-            }
-        }
-        println!("  session: {}", &agent.session_id()[..8]);
-        println!("  cwd:     {}", agent.workspace().display());
-        // Show last-used profile hint
-        if let Some((name, timestamp)) = anvil_config::load_last_profile() {
-            let ago = format_time_ago(&timestamp);
-            println!("  last profile: {} ({})", name, ago);
-            println!("  tip: anvil -p {} to reuse", name);
-        }
-        println!("  type /help for commands");
-        println!();
-    }
-}
-
-/// Show a hint about available models at startup.
-/// Queries the backend and shows count + /model tip if multiple models exist.
-async fn print_model_hint(agent: &Agent) {
-    use anvil_config::BackendKind;
-
-    let base = agent.base_url().trim_end_matches("/v1");
-    let models: Option<Vec<String>> = match agent.backend() {
-        BackendKind::Ollama => {
-            let url = format!("{base}/api/tags");
-            if let Ok(resp) = reqwest::get(&url).await {
-                if let Ok(body) = resp.json::<serde_json::Value>().await {
-                    body["models"].as_array().map(|arr| {
-                        arr.iter()
-                            .filter_map(|m| m["name"].as_str().map(String::from))
-                            .collect()
-                    })
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
-        BackendKind::LlamaServer | BackendKind::Mlx => {
-            let url = format!("{}/models", agent.base_url().trim_end_matches('/'));
-            if let Ok(resp) = reqwest::get(&url).await {
-                if let Ok(body) = resp.json::<serde_json::Value>().await {
-                    body["data"].as_array().map(|arr| {
-                        arr.iter()
-                            .filter_map(|m| m["id"].as_str().map(String::from))
-                            .collect()
-                    })
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
-        BackendKind::Custom => None,
+/// Build the prompt line with mode icon, model name, and token usage.
+fn build_prompt_line(agent: &Agent, policy: &TurnPolicy, usage: &TokenUsage) -> String {
+    let mode_icon = match agent.mode() {
+        anvil_agent::Mode::Coding => "⚒",
+        anvil_agent::Mode::Creative => "✨",
     };
-
-    if let Some(models) = models {
-        if models.len() > 1 {
-            println!(
-                "  models:  {} available — type /model to pick one",
-                models.len()
-            );
-            println!();
-        }
-    }
-}
-
-/// First-run welcome for new users. Detects if this is the first session
-/// and offers a friendly introduction with persona selection.
-fn print_first_run_welcome() {
-    println!("╭─────────────────────────────────────────────────╮");
-    println!("│  🎉  Welcome to Anvil!                          │");
-    println!("│                                                  │");
-    println!("│  Anvil is your coding buddy that runs right      │");
-    println!("│  on your computer. No internet needed!           │");
-    println!("│                                                  │");
-    println!("│  Pick a character to get started:                │");
-    println!("│                                                  │");
-    println!("│    /persona sparkle   🦄 Sparkle the Unicorn     │");
-    println!("│    /persona bolt      🤖 Bolt the Robot          │");
-    println!("│    /persona codebeard 🏴‍☠️  Captain Codebeard      │");
-    println!("│                                                  │");
-    println!("│  Then just say what you like — cats, space,      │");
-    println!("│  dragons — and watch something cool happen!      │");
-    println!("│                                                  │");
-    println!("│  Or just start typing to ask me anything.        │");
-    println!("╰─────────────────────────────────────────────────╯");
-    println!();
-}
-
-fn read_input(stdin: &io::Stdin) -> Option<String> {
-    let mut full_input = String::new();
-    let reader = stdin.lock();
-
-    for line in reader.lines() {
-        match line {
-            Ok(line) => {
-                if line.ends_with('\\') {
-                    full_input.push_str(&line[..line.len() - 1]);
-                    full_input.push('\n');
-                    // Print continuation prompt
-                    execute!(
-                        io::stdout(),
-                        SetForegroundColor(Color::Green),
-                        Print("...  "),
-                        ResetColor,
-                    )
-                    .ok();
-                    io::stdout().flush().ok();
-                    continue;
-                }
-                full_input.push_str(&line);
-                return Some(full_input);
-            }
-            Err(_) => return None,
-        }
-    }
-
-    if full_input.is_empty() {
-        None
-    } else {
-        Some(full_input)
-    }
-}
-
-fn prompt_permission(tool_name: &str, arguments: &str) -> Result<PermissionDecision> {
-    let short_args = truncate_display(arguments, 60);
-    execute!(
-        io::stdout(),
-        SetForegroundColor(Color::Yellow),
-        Print(format!("  Allow {tool_name}({short_args})? [y/n/a] ")),
-        ResetColor,
-    )?;
-    io::stdout().flush()?;
-
-    // Read single keypress using crossterm raw mode
-    terminal::enable_raw_mode()?;
-    let decision = loop {
-        if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
-            match key.code {
-                crossterm::event::KeyCode::Char('y' | 'Y') => {
-                    break PermissionDecision::Allow;
-                }
-                crossterm::event::KeyCode::Char('n' | 'N') => {
-                    break PermissionDecision::Deny;
-                }
-                crossterm::event::KeyCode::Char('a' | 'A') => {
-                    break PermissionDecision::AllowAlways;
-                }
-                crossterm::event::KeyCode::Enter => {
-                    break PermissionDecision::Allow;
-                }
-                _ => {}
-            }
-        }
+    let icon = match agent.persona().map(|p| p.key.as_str()) {
+        Some("sparkle") => "🦄",
+        Some("bolt") => "🤖",
+        Some("codebeard") => "🏴\u{200d}☠\u{fe0f}",
+        _ => mode_icon,
     };
-    terminal::disable_raw_mode()?;
+    let model_short = agent
+        .model()
+        .strip_suffix(":latest")
+        .unwrap_or(agent.model());
+    let persona = agent.persona();
 
-    let label = match &decision {
-        PermissionDecision::Allow => "yes",
-        PermissionDecision::Deny => "no",
-        PermissionDecision::AllowAlways => "always",
-    };
-    println!("{label}");
-
-    Ok(decision)
-}
-
-/// Print a session summary on exit.
-fn print_session_summary(
-    duration: std::time::Duration,
-    usage: &TokenUsage,
-    tool_counts: &std::collections::HashMap<String, u32>,
-    files_created: &[String],
-    renderer: &dyn Renderer,
-) {
-    let mins = duration.as_secs() / 60;
-    let secs = duration.as_secs() % 60;
-    let duration_str = if mins > 0 {
-        format!("{mins} min {secs}s")
-    } else {
-        format!("{secs}s")
-    };
-
-    // Build tool usage string
-    let tool_str = if tool_counts.is_empty() {
-        "none".to_string()
-    } else {
-        let mut pairs: Vec<_> = tool_counts.iter().collect();
-        pairs.sort_by(|a, b| b.1.cmp(a.1));
-        pairs
-            .iter()
-            .map(|(name, count)| format!("{name} ({count})"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
-    println!();
-    println!("{}", renderer.session_summary_header());
-    println!("│  Duration: {:<28}│", duration_str);
-    println!(
-        "│  Tokens:   {:<28}│",
-        format_token_count(usage.total_tokens)
+    let status = policy.renderer.format_status(
+        &agent.mode().to_string(),
+        model_short,
+        persona.as_ref().map(|p| p.key.as_str()),
     );
-    println!("│  Tools:    {:<28}│", tool_str);
 
-    if !files_created.is_empty() {
-        let file_list: Vec<&str> = files_created
-            .iter()
-            .map(|f| {
-                // Show just the filename, not the full path
-                f.rsplit('/').next().unwrap_or(f)
-            })
-            .collect();
-        let files_str = if file_list.len() <= 3 {
-            file_list.join(", ")
-        } else {
-            format!(
-                "{}, +{} more",
-                file_list[..3].join(", "),
-                file_list.len() - 3
-            )
-        };
-        println!("│  Files:    {:<28}│", files_str);
-    }
-
-    renderer.render_session_footer(files_created);
-    println!("╰───────────────────────────────────────╯");
-}
-
-/// Format an RFC3339 timestamp as a human-readable "time ago" string.
-fn format_time_ago(timestamp: &str) -> String {
-    let Ok(then) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
-        return "unknown".to_string();
+    let context_window = agent.context_limit() as u64;
+    let used_tokens = usage.total_tokens;
+    let usage_pct = if context_window > 0 {
+        (used_tokens * 100) / context_window
+    } else {
+        0
     };
-    let now = chrono::Utc::now();
-    let duration = now.signed_duration_since(then);
-    let mins = duration.num_minutes();
-    if mins < 1 {
-        "just now".to_string()
-    } else if mins < 60 {
-        format!("{mins} min ago")
-    } else if mins < 1440 {
-        format!("{} hours ago", mins / 60)
+
+    if usage_pct > 80 {
+        format!(
+            "\x1b[90m{status}\x1b[0m \x1b[33m[{}/{}k ⚠]\x1b[0m \x1b[32m{icon} ▸ \x1b[0m",
+            display::format_token_count(used_tokens),
+            context_window / 1000
+        )
+    } else if usage_pct > 50 {
+        format!(
+            "\x1b[90m{status}\x1b[0m \x1b[32m[{}/{}k]\x1b[0m \x1b[32m{icon} ▸ \x1b[0m",
+            display::format_token_count(used_tokens),
+            context_window / 1000
+        )
     } else {
-        format!("{} days ago", mins / 1440)
+        format!("\x1b[90m{status}\x1b[0m \x1b[32m{icon} ▸ \x1b[0m")
     }
 }
 
-/// Format token count for compact display (e.g., 1234 → "1.2k", 500 → "500").
-fn format_token_count(tokens: u64) -> String {
-    if tokens >= 1000 {
-        format!("{:.1}k", tokens as f64 / 1000.0)
-    } else {
-        tokens.to_string()
+/// Resolve numeric input (1/2/3) to a suggestion, or return the original input.
+fn resolve_suggestion<'a>(trimmed: &'a str, suggestions: &mut Vec<String>) -> &'a str {
+    if suggestions.is_empty() {
+        return trimmed;
     }
+    if let Ok(n) = trimmed.parse::<usize>() {
+        if n >= 1 && n <= suggestions.len() {
+            let suggestion = suggestions[n - 1].clone();
+            println!("  → {suggestion}");
+            suggestions.clear();
+            // Leak is fine — happens at most once per session
+            return Box::leak(suggestion.into_boxed_str());
+        }
+    }
+    // Any non-numeric input clears suggestions
+    suggestions.clear();
+    trimmed
 }
 
-/// Map tool names to display icons for terminal output.
-fn tool_icon(name: &str) -> &'static str {
-    match name {
-        "shell" => "⚙",
-        "file_read" => "📄",
-        "file_write" => "📝",
-        "file_edit" => "✏",
-        "grep" => "🔍",
-        "find" => "🔍",
-        "ls" => "📂",
-        "git_status" | "git_diff" | "git_log" | "git_commit" => "📊",
-        _ => "🔧", // MCP or plugin tools
-    }
+/// Result of handling a slash command.
+enum SlashResult {
+    Continue,
+    Break,
+    Panicked(anyhow::Error),
 }
 
-fn truncate_display(s: &str, max: usize) -> String {
-    let oneline = s.replace('\n', " ").replace('\r', "");
-    if oneline.len() <= max {
-        oneline
-    } else {
-        // Find the last char boundary at or before `max` bytes.
-        // Direct byte slicing panics on multi-byte chars (emoji like 🟢 = 4 bytes).
-        let boundary = oneline
-            .char_indices()
-            .take_while(|(i, _)| *i <= max)
-            .last()
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        format!("{}[...]", &oneline[..boundary])
-    }
-}
-
-/// Run an interactive Ralph Loop inside the interactive session.
-///
-/// Uses the same AutonomousRunner as CLI mode but integrates with the
-/// interactive event loop for display and Ctrl+C cancellation.
-async fn run_ralph_loop(
-    agent: &mut Agent,
-    args: &crate::commands::RalphArgs,
-    cumulative_usage: &mut TokenUsage,
-    ctrlc_state: &Arc<CtrlCState>,
+/// Handle all slash command variants, returning what the main loop should do.
+/// Run the multi-agent harness from a `/harness` command.
+async fn run_harness_command(
+    args: &commands::HarnessArgs,
+    agent_slot: &mut Option<Agent>,
     active_cancel: &Arc<std::sync::Mutex<Option<CancellationToken>>>,
 ) -> Result<()> {
-    let config = AutonomousConfig {
-        verify_command: args.verify_command.clone(),
-        max_iterations: args.max_iterations,
-        max_tokens: 100_000,
-        max_duration: std::time::Duration::from_secs(30 * 60),
-    };
+    use anvil_agent::harness::{self, HarnessEvent};
 
+    let agent = agent_slot.as_ref().unwrap();
+    let settings = agent.settings().clone();
+    let workspace = agent.workspace().to_path_buf();
+
+    // Create a cancellation token and register it so Ctrl+C can cancel
+    let cancel = CancellationToken::new();
+    {
+        let mut guard = active_cancel.lock().unwrap();
+        *guard = Some(cancel.clone());
+    }
+
+    let (event_tx, mut event_rx) = mpsc::channel::<HarnessEvent>(64);
+    let harness_cancel = cancel.clone();
+
+    let prompt = args.prompt.clone();
+    let verify = args.verify_command.clone();
+
+    // Print header
     execute!(
         io::stdout(),
         SetForegroundColor(Color::Cyan),
-        Print(format!(
-            "ralph: max {} iterations, verify: `{}`\n",
-            args.max_iterations, args.verify_command
-        )),
+        Print("⚙ harness: "),
+        ResetColor,
+        Print(format!("{}\n", prompt)),
+        SetForegroundColor(Color::DarkGrey),
+        Print(format!("  verify: {verify}\n\n")),
         ResetColor,
     )?;
 
-    let mut runner = AutonomousRunner::new(config);
-    let mut current_prompt = args.prompt.clone();
+    // Spawn the harness orchestrator
+    let harness_handle = tokio::spawn(async move {
+        harness::run_harness(
+            settings,
+            workspace,
+            &prompt,
+            &verify,
+            event_tx,
+            harness_cancel,
+        )
+        .await
+    });
 
-    loop {
-        // Check limits
-        let total_tokens = agent.usage().total_tokens;
-        if let Some(result) = runner.check_limits(total_tokens) {
-            print_ralph_result(&result, &runner)?;
-            break;
-        }
-
-        runner.next_iteration();
-        execute!(
-            io::stdout(),
-            SetForegroundColor(Color::DarkYellow),
-            Print(format!(
-                "\n--- iteration {}/{} ({:.0}s elapsed) ---\n",
-                runner.iteration(),
-                runner.max_iterations(),
-                runner.elapsed().as_secs_f64()
-            )),
-            ResetColor,
-        )?;
-
-        // Create cancellation token for this iteration
-        let cancel = CancellationToken::new();
-        {
-            let mut guard = active_cancel.lock().unwrap();
-            *guard = Some(cancel.clone());
-        }
-        ctrlc_state.pending.store(false, Ordering::SeqCst);
-
-        // Run agent turn with auto-approve
-        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(64);
-        let (perm_tx, perm_rx) = mpsc::channel::<PermissionDecision>(1);
-
-        // Auto-approve all tool calls in Ralph Loop
-        tokio::spawn(async move {
-            loop {
-                if perm_tx.send(PermissionDecision::Allow).await.is_err() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        });
-
-        // Run the turn directly (not spawned) since we have &mut Agent.
-        // The event channel drains after the turn completes because we drop event_tx.
-        let turn_cancel = cancel.clone();
-        let turn_result = agent
-            .turn(&current_prompt, &event_tx, perm_rx, turn_cancel)
-            .await;
-        drop(event_tx);
-
-        let mut turn_content = String::new();
-        while let Some(event) = event_rx.recv().await {
-            match event {
-                AgentEvent::ContentDelta(text) => {
-                    print!("{text}");
-                    io::stdout().flush()?;
-                    turn_content.push_str(&text);
-                }
-                AgentEvent::ToolResult { name, result } => {
-                    let lines = result.text().lines().count();
-                    execute!(
-                        io::stdout(),
-                        SetForegroundColor(Color::DarkGrey),
-                        Print(format!("  [{name}: {lines} lines]\n")),
-                        ResetColor,
-                    )?;
-                }
-                AgentEvent::Usage(u) => {
-                    cumulative_usage.prompt_tokens += u.prompt_tokens;
-                    cumulative_usage.completion_tokens += u.completion_tokens;
-                    cumulative_usage.total_tokens += u.total_tokens;
-                }
-                AgentEvent::Cancelled => {
-                    execute!(
-                        io::stdout(),
-                        SetForegroundColor(Color::DarkYellow),
-                        Print("\n  [ralph loop cancelled]\n"),
-                        ResetColor,
-                    )?;
-                    // Clear active cancel
-                    let mut guard = active_cancel.lock().unwrap();
-                    *guard = None;
-                    return Ok(());
-                }
-                _ => {}
-            }
-        }
-
-        if let Err(e) = turn_result {
-            execute!(
-                io::stdout(),
-                SetForegroundColor(Color::Red),
-                Print(format!("\nerror in turn: {e}\n")),
-                ResetColor,
-            )?;
-            break;
-        }
-
-        // Check for cancellation after turn
-        if cancel.is_cancelled() {
-            execute!(
-                io::stdout(),
-                SetForegroundColor(Color::DarkYellow),
-                Print("\n  [ralph loop cancelled]\n"),
-                ResetColor,
-            )?;
-            let mut guard = active_cancel.lock().unwrap();
-            *guard = None;
-            return Ok(());
-        }
-
-        // Check for DONE marker
-        if anvil_agent::autonomous::contains_done_marker(&turn_content) {
-            execute!(
-                io::stdout(),
-                SetForegroundColor(Color::Cyan),
-                Print("\n  [LLM declared DONE — running final verification]\n"),
-                ResetColor,
-            )?;
-        }
-
-        // Run verification
-        execute!(
-            io::stdout(),
-            SetForegroundColor(Color::DarkYellow),
-            Print(format!("  [verifying: `{}`]\n", runner.verify_command())),
-            ResetColor,
-        )?;
-
-        let result = runner.run_verify();
-        match &result {
-            IterationResult::VerifyPassed { stdout } => {
+    // Process events from the harness
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            HarnessEvent::PlanGenerated { sprints } => {
                 execute!(
                     io::stdout(),
                     SetForegroundColor(Color::Green),
-                    Print(format!("  [PASS] {}\n", stdout.trim())),
+                    Print(format!("  ✓ plan: {sprints} sprints\n")),
                     ResetColor,
                 )?;
-                print_ralph_result(&result, &runner)?;
-                break;
             }
-            IterationResult::VerifyFailed {
-                stdout,
-                stderr,
-                exit_code,
+            HarnessEvent::SprintStarted {
+                index,
+                total,
+                title,
             } => {
                 execute!(
                     io::stdout(),
-                    SetForegroundColor(Color::Red),
-                    Print(format!("  [FAIL] exit code {exit_code}\n")),
+                    SetForegroundColor(Color::Cyan),
+                    Print(format!("\n  [{}/{}] {title}\n", index + 1, total)),
                     ResetColor,
                 )?;
-                current_prompt = format!(
-                    "The verification command `{}` failed (exit code {}).\n\
-                     stdout:\n{}\nstderr:\n{}\n\
-                     Please fix the issue and try again.",
-                    runner.verify_command(),
-                    exit_code,
-                    stdout.trim(),
-                    stderr.trim()
-                );
             }
-            _ => {
-                print_ralph_result(&result, &runner)?;
-                break;
+            HarnessEvent::SprintGenerated { index: _ } => {
+                execute!(
+                    io::stdout(),
+                    SetForegroundColor(Color::DarkGrey),
+                    Print("    generator done, evaluating...\n"),
+                    ResetColor,
+                )?;
+            }
+            HarnessEvent::SprintEvalResult {
+                index: _,
+                passed,
+                attempt,
+            } => {
+                if passed {
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::Green),
+                        Print(format!("    ✓ PASS (attempt {attempt})\n")),
+                        ResetColor,
+                    )?;
+                } else {
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::Red),
+                        Print(format!("    ✗ FAIL (attempt {attempt})\n")),
+                        ResetColor,
+                    )?;
+                }
+            }
+            HarnessEvent::SprintRetry {
+                index: _,
+                attempt,
+                max_attempts,
+            } => {
+                execute!(
+                    io::stdout(),
+                    SetForegroundColor(Color::Yellow),
+                    Print(format!("    retrying ({attempt}/{max_attempts})...\n")),
+                    ResetColor,
+                )?;
+            }
+            HarnessEvent::HarnessComplete {
+                sprints_completed,
+                total_retries,
+                elapsed_secs,
+            } => {
+                let mins = elapsed_secs / 60;
+                let secs = elapsed_secs % 60;
+                execute!(
+                    io::stdout(),
+                    SetForegroundColor(Color::Green),
+                    Print(format!(
+                        "\n  ✓ harness complete: {sprints_completed} sprints, \
+                         {total_retries} retries, {mins}m{secs}s\n"
+                    )),
+                    ResetColor,
+                )?;
+            }
+            HarnessEvent::HarnessFailed { sprint, reason } => {
+                execute!(
+                    io::stdout(),
+                    SetForegroundColor(Color::Red),
+                    Print(format!(
+                        "\n  ✗ harness failed at sprint {}: {reason}\n",
+                        sprint + 1
+                    )),
+                    ResetColor,
+                )?;
+            }
+            HarnessEvent::TokenUsage { phase, tokens } => {
+                execute!(
+                    io::stdout(),
+                    SetForegroundColor(Color::DarkGrey),
+                    Print(format!("    tokens ({phase}): {tokens}\n")),
+                    ResetColor,
+                )?;
             }
         }
     }
 
-    // Clear active cancel
+    // Wait for the harness to finish
+    match harness_handle.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            execute!(
+                io::stdout(),
+                SetForegroundColor(Color::Red),
+                Print(format!("\n  harness error: {e}\n")),
+                ResetColor,
+            )?;
+        }
+        Err(e) => {
+            execute!(
+                io::stdout(),
+                SetForegroundColor(Color::Red),
+                Print(format!("\n  harness task error: {e}\n")),
+                ResetColor,
+            )?;
+        }
+    }
+
+    // Clear the cancel token
     {
         let mut guard = active_cancel.lock().unwrap();
         *guard = None;
@@ -1311,45 +766,191 @@ async fn run_ralph_loop(
     Ok(())
 }
 
-/// Print a summary of the Ralph Loop result.
-fn print_ralph_result(result: &IterationResult, runner: &AutonomousRunner) -> Result<()> {
-    let elapsed = runner.elapsed();
-    let mins = elapsed.as_secs() / 60;
-    let secs = elapsed.as_secs() % 60;
+async fn handle_slash_command(
+    trimmed: &str,
+    agent_slot: &mut Option<Agent>,
+    policy: &mut TurnPolicy,
+    cumulative_usage: &mut TokenUsage,
+    managed_backend: &mut Option<crate::backend::BackendProcess>,
+    _ctrlc_state: &Arc<CtrlCState>,
+    active_cancel: &Arc<std::sync::Mutex<Option<CancellationToken>>>,
+) -> Result<SlashResult> {
+    let agent = agent_slot.as_mut().expect("agent lost");
 
-    let msg = match result {
-        IterationResult::VerifyPassed { .. } => {
-            format!(
-                "ralph: PASSED after {} iterations ({mins}m {secs}s)",
-                runner.iteration()
+    match commands::handle_command(trimmed, agent, cumulative_usage).await {
+        CommandResult::Handled(output) => {
+            if !output.is_empty() {
+                policy.renderer.render_command_result(&output);
+            }
+            Ok(SlashResult::Continue)
+        }
+        CommandResult::Compact => {
+            policy.renderer.render_info("  [compacting context...]");
+
+            let cancel = CancellationToken::new();
+            let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(64);
+
+            let mut moved_agent = agent_slot.take().unwrap();
+            let compact_handle = tokio::spawn(async move {
+                let result = moved_agent.compact(4, &event_tx, cancel).await;
+                (moved_agent, result)
+            });
+
+            match compact_handle.await {
+                Ok((returned_agent, Ok(result))) => {
+                    *agent_slot = Some(returned_agent);
+                    if result.messages_removed == 0 {
+                        policy.renderer.render_info("  [nothing to compact]");
+                    } else {
+                        policy.renderer.render_info(&format!(
+                            "  [compacted: {} messages removed, ~{} → ~{} tokens]",
+                            result.messages_removed, result.before_tokens, result.after_tokens,
+                        ));
+                    }
+                }
+                Ok((returned_agent, Err(e))) => {
+                    *agent_slot = Some(returned_agent);
+                    policy
+                        .renderer
+                        .render_error(&format!("compaction failed: {e}"));
+                }
+                Err(e) => {
+                    return Ok(SlashResult::Panicked(anyhow::anyhow!(
+                        "compaction task panicked: {e}"
+                    )));
+                }
+            }
+            Ok(SlashResult::Continue)
+        }
+        CommandResult::BackendStart(args) => {
+            if let Some(ref mut bp) = managed_backend {
+                bp.stop();
+                *managed_backend = None;
+            }
+
+            match args.backend_type.as_str() {
+                "llama" | "llama-server" => {
+                    match crate::backend::BackendProcess::start_llama_server(
+                        &args.model_path,
+                        args.port,
+                        &[],
+                    )
+                    .await
+                    {
+                        Ok(bp) => {
+                            let url = bp.base_url().to_string();
+                            let agent = agent_slot.as_mut().expect("agent lost");
+                            agent.set_backend(anvil_config::BackendKind::LlamaServer, url.clone());
+                            execute!(
+                                io::stdout(),
+                                SetForegroundColor(Color::Green),
+                                Print(format!("backend started: llama-server at {url}\n")),
+                                ResetColor,
+                            )?;
+                            *managed_backend = Some(bp);
+                        }
+                        Err(e) => {
+                            execute!(
+                                io::stdout(),
+                                SetForegroundColor(Color::Red),
+                                Print(format!("failed to start backend: {e}\n")),
+                                ResetColor,
+                            )?;
+                        }
+                    }
+                }
+                other => {
+                    execute!(
+                        io::stdout(),
+                        SetForegroundColor(Color::Red),
+                        Print(format!(
+                            "managed start not supported for '{other}'. Use: llama\n"
+                        )),
+                        ResetColor,
+                    )?;
+                }
+            }
+            Ok(SlashResult::Continue)
+        }
+        CommandResult::BackendStop => {
+            if let Some(ref mut bp) = managed_backend {
+                bp.stop();
+                *managed_backend = None;
+                execute!(
+                    io::stdout(),
+                    SetForegroundColor(Color::Green),
+                    Print("backend stopped\n"),
+                    ResetColor,
+                )?;
+            } else {
+                println!("no managed backend running");
+            }
+            Ok(SlashResult::Continue)
+        }
+        CommandResult::Ralph(args) => {
+            let mut moved_agent = agent_slot.take().unwrap();
+            let result = ralph::run_ralph_loop(
+                &mut moved_agent,
+                &args,
+                cumulative_usage,
+                &Arc::new(ralph::CtrlCState {
+                    pending: AtomicBool::new(false),
+                }),
+                active_cancel,
             )
+            .await;
+            *agent_slot = Some(moved_agent);
+            if let Err(e) = result {
+                execute!(
+                    io::stdout(),
+                    SetForegroundColor(Color::Red),
+                    Print(format!("ralph error: {e}\n")),
+                    ResetColor,
+                )?;
+            }
+            Ok(SlashResult::Continue)
         }
-        IterationResult::MaxIterationsReached => {
-            format!(
-                "ralph: STOPPED — max iterations ({}) reached ({mins}m {secs}s)",
-                runner.max_iterations()
-            )
+        CommandResult::Harness(args) => {
+            run_harness_command(&args, agent_slot, active_cancel).await?;
+            Ok(SlashResult::Continue)
         }
-        IterationResult::MaxTokensReached => {
-            format!("ralph: STOPPED — token budget exceeded ({mins}m {secs}s)")
+        CommandResult::Exit => Ok(SlashResult::Break),
+        CommandResult::Unknown(cmd) => {
+            eprintln!("unknown command: {cmd} — try /help");
+            Ok(SlashResult::Continue)
         }
-        IterationResult::TimeoutReached => {
-            format!("ralph: STOPPED — time limit reached ({mins}m {secs}s)")
-        }
-        IterationResult::VerifyFailed { exit_code, .. } => {
-            format!("ralph: FAILED — verify exit code {exit_code} ({mins}m {secs}s)")
-        }
-        IterationResult::LlmDeclaredDone => {
-            format!("ralph: LLM declared done ({mins}m {secs}s)")
-        }
-    };
+    }
+}
 
-    execute!(
-        io::stdout(),
-        SetForegroundColor(Color::Cyan),
-        Print(format!("\n{msg}\n")),
-        ResetColor,
-    )?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    Ok(())
+    #[test]
+    fn resolve_suggestion_numeric() {
+        let mut suggestions = vec![
+            "Make something sparkly".to_string(),
+            "Tell me a joke".to_string(),
+        ];
+        let result = resolve_suggestion("1", &mut suggestions);
+        assert_eq!(result, "Make something sparkly");
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn resolve_suggestion_non_numeric_clears() {
+        let mut suggestions = vec!["hello".to_string()];
+        let result = resolve_suggestion("hello world", &mut suggestions);
+        assert_eq!(result, "hello world");
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn resolve_suggestion_out_of_range() {
+        let mut suggestions = vec!["hello".to_string()];
+        let result = resolve_suggestion("5", &mut suggestions);
+        assert_eq!(result, "5");
+        // Out-of-range numeric input clears suggestions (same as non-numeric)
+        assert!(suggestions.is_empty());
+    }
 }

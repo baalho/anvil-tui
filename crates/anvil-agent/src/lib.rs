@@ -3,10 +3,13 @@ mod agent;
 pub mod autonomous;
 pub mod dispatch;
 pub mod event;
+pub mod harness;
 mod json_filter;
 pub mod memory;
 pub mod mode;
 pub mod persona;
+pub mod projects;
+pub mod repo_map;
 pub mod routing;
 mod session;
 pub mod skills;
@@ -21,6 +24,7 @@ pub use event::Event;
 pub use memory::MemoryStore;
 pub use mode::Mode;
 pub use persona::{builtin_personas, find_persona, is_kids_persona, random_suggestions, Persona};
+pub use repo_map::RepoMap;
 pub use routing::ModelRouter;
 pub use session::{
     SearchResult, Session, SessionSnapshot, SessionStatus, SessionStore, StoredMessage,

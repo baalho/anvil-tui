@@ -3,7 +3,7 @@
 //! Each tool is an async function taking a workspace path and JSON arguments.
 //! All file paths are resolved relative to the workspace root with traversal prevention.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -38,6 +38,59 @@ fn resolve_path(workspace: &Path, path_str: &str) -> Result<PathBuf> {
     }
 
     Ok(canonical)
+}
+
+/// Write to a file with TOCTOU protection.
+///
+/// On Unix, re-verifies the path hasn't been replaced with a symlink between
+/// `resolve_path` and the actual write. For existing files, opens with
+/// `O_NOFOLLOW` to reject symlinks. For new files, re-canonicalizes the
+/// parent directory and verifies it's still within the workspace.
+async fn safe_write(path: &Path, content: &[u8], workspace: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Try O_NOFOLLOW first — works for existing files, rejects symlinks
+        let result = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path);
+
+        match result {
+            Ok(mut file) => {
+                use std::io::Write;
+                file.write_all(content)?;
+                Ok(())
+            }
+            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+                bail!("refusing to write through symlink: {}", path.display());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // New file — verify parent is still within workspace
+                if let Some(parent) = path.parent() {
+                    let canon_parent = parent.canonicalize()?;
+                    let canon_ws = workspace.canonicalize()?;
+                    if !canon_parent.starts_with(&canon_ws) {
+                        bail!(
+                            "parent directory escaped workspace: {}",
+                            canon_parent.display()
+                        );
+                    }
+                }
+                tokio::fs::write(path, content).await?;
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::fs::write(path, content).await?;
+        Ok(())
+    }
 }
 
 pub async fn file_read(workspace: &Path, args: &Value) -> Result<String> {
@@ -75,7 +128,9 @@ pub async fn file_write(workspace: &Path, args: &Value) -> Result<String> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::write(&path, content).await?;
+    safe_write(&path, content.as_bytes(), workspace)
+        .await
+        .with_context(|| format!("writing {}", path.display()))?;
 
     Ok(format!(
         "wrote {} bytes to {}",
@@ -105,7 +160,9 @@ pub async fn file_edit(workspace: &Path, args: &Value) -> Result<String> {
     }
 
     let new_content = content.replacen(old_str, new_str, 1);
-    tokio::fs::write(&path, &new_content).await?;
+    safe_write(&path, new_content.as_bytes(), workspace)
+        .await
+        .with_context(|| format!("editing {}", path.display()))?;
 
     Ok(format!("edited {}", path.display()))
 }

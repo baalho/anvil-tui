@@ -11,6 +11,8 @@ pub enum CommandResult {
     Compact,
     /// Start an interactive Ralph Loop with the given config.
     Ralph(RalphArgs),
+    /// Start the multi-agent harness (planner/generator/evaluator).
+    Harness(HarnessArgs),
     /// Start a managed backend process.
     BackendStart(BackendStartArgs),
     /// Stop the managed backend process.
@@ -24,6 +26,28 @@ pub struct BackendStartArgs {
     pub backend_type: String,
     pub model_path: String,
     pub port: u16,
+}
+
+/// Parsed arguments for a `/harness` command.
+pub struct HarnessArgs {
+    pub prompt: String,
+    pub verify_command: String,
+    /// Which harness operation to perform.
+    #[allow(dead_code)]
+    pub subcommand: HarnessSubcommand,
+}
+
+/// Subcommand for `/harness`.
+#[allow(dead_code)]
+pub enum HarnessSubcommand {
+    /// Start a new harness run.
+    Start,
+    /// Show current harness status.
+    Status,
+    /// Resume from last completed sprint.
+    Resume,
+    /// Cancel the current harness run.
+    Cancel,
 }
 
 /// Parsed arguments for an interactive `/ralph` command.
@@ -55,17 +79,29 @@ pub async fn handle_command(
         "/backend" => backend_command(agent, arg),
         "/history" => CommandResult::Handled(history_text(agent)),
         "/ralph" => ralph_command(arg),
+        "/harness" => harness_command(agent, arg),
         "/clear" => CommandResult::Compact,
         "/think" => CommandResult::Handled(think_command(agent)),
         "/memory" => CommandResult::Handled(memory_command(agent, arg)),
         "/mode" => CommandResult::Handled(mode_command(agent, arg)),
-        "/pane" => CommandResult::Handled(pane_command(arg)),
+        "/context" => CommandResult::Handled(context_command(agent, arg)),
         "/route" => CommandResult::Handled(route_command(agent, arg)),
         "/skill" => CommandResult::Handled(skill_command(agent, arg)),
         "/mcp" => CommandResult::Handled(mcp_command(agent, arg).await),
         "/persona" => CommandResult::Handled(persona_command(agent, arg)),
         "/inventory" => CommandResult::Handled(inventory_command(agent)),
         "/selftest" => CommandResult::Handled(selftest_command(agent)),
+        "/map" => CommandResult::Handled(map_command(agent)),
+        "/commit" => CommandResult::Handled(commit_hint(agent)),
+        "/project" => CommandResult::Handled(project_command(agent, arg)),
+        "/refresh" => {
+            agent.refresh_repo_map();
+            CommandResult::Handled(format!(
+                "repo map refreshed: {} files, {} symbols",
+                agent.repo_map().file_count(),
+                agent.repo_map().symbol_count()
+            ))
+        }
         _ => CommandResult::Unknown(cmd.to_string()),
     }
 }
@@ -90,7 +126,10 @@ fn help_text() -> String {
                 ("/backend [type url]", "Show or switch backend"),
                 ("/backend start llama <model>", "Start managed llama-server"),
                 ("/backend stop", "Stop managed backend"),
-                ("/pane <text>", "Send text to a Zellij floating pane"),
+                (
+                    "/context [list|show|clean]",
+                    "Manage overflow context files",
+                ),
                 ("/route [tool model]", "Show or set model routing"),
             ],
         ),
@@ -122,9 +161,22 @@ fn help_text() -> String {
                     "/ralph <prompt> --verify <cmd>",
                     "Autonomous mode (Ralph Loop)",
                 ),
+                (
+                    "/harness <prompt> --verify <cmd>",
+                    "Multi-agent harness (plan/build/eval)",
+                ),
+                ("/harness status", "Show harness run status"),
+                ("/harness resume", "Resume from last sprint"),
                 ("/mcp", "List MCP servers and tools"),
                 ("/inventory", "Show hosts from inventory.toml"),
                 ("/selftest", "Verify all tools work (no LLM)"),
+                ("/commit", "Show uncommitted changes and suggest a commit"),
+                (
+                    "/project [list|start|next|hint]",
+                    "Guided projects for kids",
+                ),
+                ("/map", "Show repo map (indexed files and symbols)"),
+                ("/refresh", "Rescan workspace and rebuild repo map"),
             ],
         ),
     ];
@@ -179,17 +231,174 @@ fn mode_command(agent: &mut Agent, arg: &str) -> String {
 }
 
 /// Send content to a Zellij floating pane.
-fn pane_command(arg: &str) -> String {
-    if arg.is_empty() {
-        return "usage: /pane <text to display in floating pane>".to_string();
+fn project_command(agent: &mut Agent, arg: &str) -> String {
+    let subcmd = arg.split_whitespace().next().unwrap_or("list");
+    let rest = arg.strip_prefix(subcmd).unwrap_or("").trim();
+
+    match subcmd {
+        "list" | "" => anvil_agent::projects::format_project_list(),
+        "start" => {
+            if rest.is_empty() {
+                return "usage: /project start <name>".to_string();
+            }
+            match anvil_agent::projects::start_project(rest, agent.workspace()) {
+                Ok(active) => {
+                    let display = active.format_current_step();
+                    agent.set_active_project(Some(active));
+                    display
+                }
+                Err(e) => format!("error: {e}"),
+            }
+        }
+        "next" => {
+            let project = match agent.active_project_mut() {
+                Some(p) => p,
+                None => {
+                    return "no active project. Start one with /project start <name>".to_string()
+                }
+            };
+
+            // Verify current step first
+            match project.verify_current() {
+                Ok(true) => {
+                    project.advance();
+                    project.format_current_step()
+                }
+                Ok(false) => {
+                    format!(
+                        "✨ Not quite done yet! Try again.\n\n  Current step: \"{}\"",
+                        project
+                            .current()
+                            .map(|s| s.prompt.as_str())
+                            .unwrap_or("done")
+                    )
+                }
+                Err(e) => format!("verification error: {e}"),
+            }
+        }
+        "hint" => match agent.active_project() {
+            Some(project) => match project.current() {
+                Some(step) => format!("💡 Hint: {}", step.hint),
+                None => "🎉 You already finished all the steps!".to_string(),
+            },
+            None => "no active project. Start one with /project start <name>".to_string(),
+        },
+        _ => "usage: /project [list|start <name>|next|hint]".to_string(),
     }
-    if !crate::zellij::ZellijPanes::is_available() {
-        return "not inside a Zellij session — /pane requires Zellij".to_string();
+}
+
+fn commit_hint(agent: &Agent) -> String {
+    let workspace = agent.workspace();
+    match check_uncommitted(workspace) {
+        Ok(status) => {
+            if status.changed_files == 0 {
+                "no uncommitted changes".to_string()
+            } else {
+                format!(
+                    "{} uncommitted changes across {} files:\n{}\n\n\
+                     Tip: ask me to commit these changes, or use git directly.",
+                    status.changed_files, status.unique_files, status.summary
+                )
+            }
+        }
+        Err(e) => format!("error checking git status: {e}"),
     }
-    if crate::zellij::ZellijPanes::open_pane_with_file("anvil", arg) {
-        "opened floating pane".to_string()
+}
+
+/// Check for uncommitted changes in the workspace.
+pub fn check_uncommitted(workspace: &std::path::Path) -> anyhow::Result<UncommittedStatus> {
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(workspace)
+        .output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    let changed_files = lines.len();
+
+    let unique_files: std::collections::HashSet<&str> =
+        lines.iter().filter_map(|l| l.get(3..)).collect();
+
+    let summary = if lines.len() <= 10 {
+        lines.join("\n")
     } else {
-        "failed to open Zellij pane".to_string()
+        let first_10: Vec<&str> = lines.iter().take(10).copied().collect();
+        format!(
+            "{}\n  ... and {} more",
+            first_10.join("\n"),
+            lines.len() - 10
+        )
+    };
+
+    Ok(UncommittedStatus {
+        changed_files,
+        unique_files: unique_files.len(),
+        summary,
+    })
+}
+
+pub struct UncommittedStatus {
+    pub changed_files: usize,
+    pub unique_files: usize,
+    pub summary: String,
+}
+
+fn map_command(agent: &Agent) -> String {
+    let map = agent.repo_map();
+    if map.file_count() == 0 {
+        return "no source files found in workspace".to_string();
+    }
+    format!(
+        "repo map: {} files, {} symbols\n\n{}",
+        map.file_count(),
+        map.symbol_count(),
+        map.summary(4000)
+    )
+}
+
+fn context_command(agent: &Agent, arg: &str) -> String {
+    let workspace = agent.workspace();
+    let subcmd = arg.split_whitespace().next().unwrap_or("list");
+    let rest = arg.strip_prefix(subcmd).unwrap_or("").trim();
+
+    match subcmd {
+        "list" | "" => {
+            let files = match crate::context::list_context_files(workspace) {
+                Ok(f) => f,
+                Err(e) => return format!("error: {e}"),
+            };
+            if files.is_empty() {
+                return "no context files. Overflow output is saved to .anvil/context/".to_string();
+            }
+            let mut out = format!("{} context files:\n", files.len());
+            for f in &files {
+                out.push_str(&format!(
+                    "  {} ({}, {})\n",
+                    f.name,
+                    f.size_display(),
+                    f.age_display()
+                ));
+            }
+            out
+        }
+        "show" => {
+            if rest.is_empty() {
+                return "usage: /context show <filename>".to_string();
+            }
+            match crate::context::read_context_file(workspace, rest) {
+                Ok(content) => content,
+                Err(e) => format!("error: {e}"),
+            }
+        }
+        "clean" => {
+            let keep: usize = rest.parse().unwrap_or(10);
+            match crate::context::cleanup_context(workspace, keep) {
+                Ok(0) => "nothing to clean up".to_string(),
+                Ok(n) => format!("removed {n} old context files (kept {keep})"),
+                Err(e) => format!("error: {e}"),
+            }
+        }
+        _ => "usage: /context [list|show <file>|clean [keep]]".to_string(),
     }
 }
 
@@ -822,6 +1031,151 @@ fn parse_ralph_args(input: &str) -> Result<(String, String, usize), String> {
     let verify_cmd = verify_parts.join(" ");
 
     Ok((prompt, verify_cmd, max_iterations))
+}
+
+/// Handle `/harness` — multi-agent harness for long-running tasks.
+///
+/// Decomposes a task into sprints using a planner agent, implements each
+/// sprint with a generator agent (context reset between sprints), and
+/// evaluates each sprint with a separate evaluator agent.
+fn harness_command(agent: &Agent, arg: &str) -> CommandResult {
+    if arg.is_empty() {
+        return CommandResult::Handled(
+            [
+                "Multi-agent harness (planner → generator → evaluator):",
+                "",
+                "Usage:",
+                "  /harness <prompt> --verify <cmd>",
+                "",
+                "Subcommands:",
+                "  /harness status    Show current harness run status",
+                "  /harness resume    Resume from last completed sprint",
+                "  /harness cancel    Cancel the current harness run",
+                "",
+                "Example:",
+                "  /harness add error handling to all public functions --verify cargo test",
+                "",
+                "The planner decomposes the task into sprints.",
+                "Each sprint is implemented by a fresh generator agent (context reset).",
+                "An evaluator agent verifies each sprint against acceptance criteria.",
+                "Failed sprints are retried with evaluator feedback.",
+            ]
+            .join("\n"),
+        );
+    }
+
+    // Subcommands
+    match arg.trim() {
+        "status" => {
+            return CommandResult::Handled(harness_status(agent));
+        }
+        "cancel" => {
+            return CommandResult::Handled(harness_cancel(agent));
+        }
+        "resume" => {
+            // For resume, we need the verify command from the saved state
+            let workspace = agent.workspace();
+            let hdir = anvil_agent::harness::harness_dir(workspace);
+            match anvil_agent::harness::HarnessState::load(&hdir) {
+                Ok(state) => {
+                    if state.harness.status != anvil_agent::harness::HarnessStatus::Running
+                        && state.harness.status != anvil_agent::harness::HarnessStatus::Failed
+                    {
+                        return CommandResult::Handled(format!(
+                            "harness status is '{}' — nothing to resume",
+                            state.harness.status
+                        ));
+                    }
+                    return CommandResult::Harness(HarnessArgs {
+                        prompt: state.harness.prompt.clone(),
+                        verify_command: state.harness.verify_command.clone(),
+                        subcommand: HarnessSubcommand::Resume,
+                    });
+                }
+                Err(_) => {
+                    return CommandResult::Handled(
+                        "no harness run found. start one with: /harness <prompt> --verify <cmd>"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // Parse --verify from the argument string (reuse ralph arg parser pattern)
+    let (prompt, verify_cmd, _) = match parse_ralph_args(arg) {
+        Ok(parsed) => parsed,
+        Err(e) => return CommandResult::Handled(format!("error: {e}")),
+    };
+
+    if verify_cmd.is_empty() {
+        return CommandResult::Handled(
+            "error: --verify <cmd> is required. Example: /harness add tests --verify cargo test"
+                .to_string(),
+        );
+    }
+
+    CommandResult::Harness(HarnessArgs {
+        prompt,
+        verify_command: verify_cmd,
+        subcommand: HarnessSubcommand::Start,
+    })
+}
+
+/// Show the current harness run status.
+fn harness_status(agent: &Agent) -> String {
+    let workspace = agent.workspace();
+    let hdir = anvil_agent::harness::harness_dir(workspace);
+
+    match anvil_agent::harness::HarnessState::load(&hdir) {
+        Ok(state) => {
+            let h = &state.harness;
+            let u = &state.usage;
+            format!(
+                "harness: {}\n\
+                 prompt:  {}\n\
+                 verify:  {}\n\
+                 sprint:  {}/{}\n\
+                 attempt: {}/{}\n\
+                 tokens:  planner={} generator={} evaluator={} total={}\n\
+                 started: {}",
+                h.status,
+                h.prompt,
+                h.verify_command,
+                h.current_sprint + 1,
+                h.total_sprints,
+                h.current_attempt,
+                h.max_attempts_per_sprint,
+                u.planner_tokens,
+                u.generator_tokens,
+                u.evaluator_tokens,
+                u.total_tokens,
+                h.started_at.format("%Y-%m-%d %H:%M:%S UTC"),
+            )
+        }
+        Err(_) => "no harness run found".to_string(),
+    }
+}
+
+/// Cancel the current harness run.
+fn harness_cancel(agent: &Agent) -> String {
+    let workspace = agent.workspace();
+    let hdir = anvil_agent::harness::harness_dir(workspace);
+
+    match anvil_agent::harness::HarnessState::load(&hdir) {
+        Ok(mut state) => {
+            if state.harness.status != anvil_agent::harness::HarnessStatus::Running {
+                return format!("harness is already '{}'", state.harness.status);
+            }
+            state.harness.status = anvil_agent::harness::HarnessStatus::Cancelled;
+            if let Err(e) = state.save(&hdir) {
+                return format!("error saving state: {e}");
+            }
+            "harness cancelled".to_string()
+        }
+        Err(_) => "no harness run found".to_string(),
+    }
 }
 
 /// Handle `/backend` — show or switch the inference backend.

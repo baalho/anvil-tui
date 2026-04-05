@@ -9,6 +9,11 @@
 //! kids-specific behavior is active (tool_choice=required, sandbox,
 //! auto-approve). The binary crate's `TurnPolicy` reads this once
 //! per turn to derive rendering and permission decisions.
+//!
+//! # `let _ = event_tx.send(...)` pattern
+//! Event channel sends throughout this module use `let _ =` because the
+//! receiver (interactive loop) may be dropped during cancellation or
+//! shutdown. A failed send means no one is listening — not an error.
 
 use crate::mode::Mode;
 use crate::routing::ModelRouter;
@@ -111,6 +116,10 @@ pub struct Agent {
     active_persona: Option<crate::persona::Persona>,
     /// Operating mode — controls tool availability and response style.
     mode: Mode,
+    /// Repo map — workspace file/symbol index for auto-context.
+    repo_map: crate::repo_map::RepoMap,
+    /// Active guided project (kids mode).
+    active_project: Option<crate::projects::ActiveProject>,
 }
 
 impl Agent {
@@ -140,6 +149,8 @@ impl Agent {
         let loop_detection_limit = settings.agent.loop_detection_limit as usize;
         let auto_compact_threshold = settings.agent.auto_compact_threshold;
 
+        let repo_map = crate::repo_map::RepoMap::scan(&workspace);
+
         Ok(Self {
             client,
             executor,
@@ -158,6 +169,69 @@ impl Agent {
             mcp,
             active_persona: None,
             mode: Mode::default(),
+            repo_map,
+            active_project: None,
+        })
+    }
+
+    /// Create an agent with a custom system prompt and optional model override.
+    ///
+    /// Used by the harness orchestrator to create planner, generator, and
+    /// evaluator agents with role-specific prompts. Each agent gets a fresh
+    /// context window — this is the "context reset" pattern from the Anthropic
+    /// harness design article.
+    pub fn with_system_prompt(
+        mut settings: Settings,
+        workspace: PathBuf,
+        store: SessionStore,
+        mcp: Arc<McpManager>,
+        system_prompt: &str,
+        model_override: Option<&str>,
+    ) -> Result<Self> {
+        if let Some(model) = model_override {
+            if !model.is_empty() {
+                settings.provider.model = model.to_string();
+            }
+        }
+
+        let client = LlmClient::new(settings.provider.clone())?;
+        let executor = ToolExecutor::new(
+            workspace.clone(),
+            settings.tools.shell_timeout_secs,
+            settings.tools.output_limit,
+        );
+
+        let session = store.create_session()?;
+        let messages = vec![ChatMessage::system(system_prompt.to_string())];
+
+        let context_limit = settings.agent.context_window;
+        let loop_detection_limit = settings.agent.loop_detection_limit as usize;
+        let auto_compact_threshold = settings.agent.auto_compact_threshold;
+
+        // Skip repo map scan for harness agents — the orchestrator injects
+        // relevant context directly into the system prompt.
+        let repo_map = crate::repo_map::RepoMap::empty();
+
+        Ok(Self {
+            client,
+            executor,
+            store,
+            settings,
+            _workspace: workspace,
+            session_id: session.id,
+            messages,
+            context_limit,
+            loop_detection_limit,
+            auto_compact_threshold,
+            tool_call_hashes: Vec::new(),
+            active_skills: Vec::new(),
+            thinking_filter: ThinkingFilter::new(),
+            router: ModelRouter::new(),
+            mcp,
+            active_persona: None,
+            mode: Mode::default(),
+            repo_map,
+            active_project: None,
         })
     }
 
@@ -236,6 +310,8 @@ impl Agent {
         let loop_detection_limit = settings.agent.loop_detection_limit as usize;
         let auto_compact_threshold = settings.agent.auto_compact_threshold;
 
+        let repo_map = crate::repo_map::RepoMap::scan(&workspace);
+
         let mut agent = Self {
             client,
             executor,
@@ -254,6 +330,8 @@ impl Agent {
             mcp,
             active_persona: None,
             mode: Mode::default(),
+            repo_map,
+            active_project: None,
         };
 
         // Restore agent state from snapshot
@@ -294,6 +372,36 @@ impl Agent {
 
     pub fn workspace(&self) -> &std::path::Path {
         &self._workspace
+    }
+
+    /// Get the full settings (used by harness orchestrator to clone for sub-agents).
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// Get the repo map for auto-context queries.
+    pub fn repo_map(&self) -> &crate::repo_map::RepoMap {
+        &self.repo_map
+    }
+
+    /// Get the active guided project.
+    pub fn active_project(&self) -> Option<&crate::projects::ActiveProject> {
+        self.active_project.as_ref()
+    }
+
+    /// Get a mutable reference to the active guided project.
+    pub fn active_project_mut(&mut self) -> Option<&mut crate::projects::ActiveProject> {
+        self.active_project.as_mut()
+    }
+
+    /// Set the active guided project.
+    pub fn set_active_project(&mut self, project: Option<crate::projects::ActiveProject>) {
+        self.active_project = project;
+    }
+
+    /// Rescan the workspace and rebuild the repo map.
+    pub fn refresh_repo_map(&mut self) {
+        self.repo_map = crate::repo_map::RepoMap::scan(&self._workspace);
     }
 
     /// Toggle whether `<think>` blocks are shown in output.
@@ -666,7 +774,9 @@ impl Agent {
                     std::env::temp_dir().join(format!("anvil-kids-{}", std::process::id()))
                 };
                 // Create the directory if it doesn't exist
-                let _ = std::fs::create_dir_all(&ws_path);
+                if let Err(e) = std::fs::create_dir_all(&ws_path) {
+                    tracing::warn!("failed to create kids workspace {}: {e}", ws_path.display());
+                }
                 let allowed = self
                     .settings
                     .agent
@@ -790,6 +900,29 @@ impl Agent {
         mut permission_rx: mpsc::Receiver<PermissionDecision>,
         cancel: CancellationToken,
     ) -> Result<()> {
+        // Auto-context: if the user mentions a symbol or filename, inject
+        // the relevant file contents so the model has context without file_read.
+        let auto_context_files = self.repo_map.find_files_for_query(user_input);
+        if !auto_context_files.is_empty() {
+            let mut context_parts = Vec::new();
+            for rel_path in &auto_context_files {
+                let abs_path = self._workspace.join(rel_path);
+                if let Ok(content) = std::fs::read_to_string(&abs_path) {
+                    // Cap individual file at 500 lines to avoid context bloat
+                    let truncated: String =
+                        content.lines().take(500).collect::<Vec<_>>().join("\n");
+                    context_parts.push(format!("### {}\n```\n{}\n```", rel_path, truncated));
+                }
+            }
+            if !context_parts.is_empty() {
+                let context_msg = format!(
+                    "Relevant files auto-included based on your query:\n\n{}",
+                    context_parts.join("\n\n")
+                );
+                self.messages.push(ChatMessage::system(&context_msg));
+            }
+        }
+
         let user_msg = ChatMessage::user(user_input);
         self.messages.push(user_msg);
         self.record_last_message();
@@ -977,9 +1110,12 @@ impl Agent {
                 .await;
 
             // Persist cumulative usage so cost data survives restarts
-            let _ = self
+            if let Err(e) = self
                 .store
-                .update_session_usage(&self.session_id, self.client.usage());
+                .update_session_usage(&self.session_id, self.client.usage())
+            {
+                tracing::warn!("failed to persist usage: {e}");
+            }
 
             let tool_calls = tool_acc.finish();
 

@@ -914,3 +914,125 @@ async fn kids_sandbox_blocks_scripts_outside_workspace() {
     let err = result.unwrap_err().to_string();
     assert!(err.contains("project folder"), "got: {err}");
 }
+
+#[tokio::test]
+async fn kids_sandbox_blocks_shell_metacharacters() {
+    let dir = TempDir::new().unwrap();
+    let executor = ToolExecutor::new(dir.path().to_path_buf(), 10, 10_000);
+    executor.set_kids_sandbox(anvil_tools::KidsSandbox {
+        workspace: dir.path().to_path_buf(),
+        allowed_commands: vec!["echo".to_string(), "ls".to_string()],
+    });
+
+    // Semicolon injection
+    let result = executor
+        .execute("shell", &json!({"command": "echo hello; rm -rf /"}))
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("special characters"), "got: {err}");
+
+    // Pipe injection
+    let result = executor
+        .execute("shell", &json!({"command": "echo hello | cat"}))
+        .await;
+    assert!(result.is_err());
+
+    // Backtick injection
+    let result = executor
+        .execute("shell", &json!({"command": "echo `whoami`"}))
+        .await;
+    assert!(result.is_err());
+
+    // $() subshell injection
+    let result = executor
+        .execute("shell", &json!({"command": "echo $(whoami)"}))
+        .await;
+    assert!(result.is_err());
+
+    // Redirect injection
+    let result = executor
+        .execute("shell", &json!({"command": "echo hello > /etc/passwd"}))
+        .await;
+    assert!(result.is_err());
+
+    // Ampersand injection
+    let result = executor
+        .execute("shell", &json!({"command": "echo hello & rm -rf /"}))
+        .await;
+    assert!(result.is_err());
+
+    // Clean command should pass
+    let result = executor
+        .execute("shell", &json!({"command": "echo hello world"}))
+        .await;
+    assert!(
+        result.is_ok(),
+        "clean command should pass: {:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+async fn kids_sandbox_blocks_bare_interpreter() {
+    let dir = TempDir::new().unwrap();
+    let executor = ToolExecutor::new(dir.path().to_path_buf(), 10, 10_000);
+    executor.set_kids_sandbox(anvil_tools::KidsSandbox {
+        workspace: dir.path().to_path_buf(),
+        allowed_commands: vec!["python3".to_string(), "node".to_string()],
+    });
+
+    // Bare python3 (reads stdin — allows code injection via heredoc)
+    let result = executor
+        .execute("shell", &json!({"command": "python3"}))
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("needs a script file"), "got: {err}");
+
+    // Bare node
+    let result = executor.execute("shell", &json!({"command": "node"})).await;
+    assert!(result.is_err());
+
+    // python3 with flags but no file
+    let result = executor
+        .execute("shell", &json!({"command": "python3 -u"}))
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn kids_sandbox_blocks_symlink_file_write() {
+    let dir = TempDir::new().unwrap();
+    let kids_dir = dir.path().join("kids-projects");
+    fs::create_dir_all(&kids_dir).unwrap();
+
+    // Create a target file outside the sandbox
+    let outside_file = dir.path().join("secret.txt");
+    fs::write(&outside_file, "original content").unwrap();
+
+    // Create a symlink inside the sandbox pointing outside
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside_file, kids_dir.join("link.txt")).unwrap();
+
+        let executor = ToolExecutor::new(kids_dir.clone(), 10, 10_000);
+        executor.set_kids_sandbox(anvil_tools::KidsSandbox {
+            workspace: kids_dir,
+            allowed_commands: vec!["echo".to_string()],
+        });
+
+        // Writing through the symlink should fail (O_NOFOLLOW rejects it)
+        let result = executor
+            .execute(
+                "file_write",
+                &json!({"path": "link.txt", "content": "hacked"}),
+            )
+            .await;
+        assert!(result.is_err(), "symlink write should be rejected");
+
+        // Verify original file wasn't modified
+        let content = fs::read_to_string(&outside_file).unwrap();
+        assert_eq!(content, "original content");
+    }
+}

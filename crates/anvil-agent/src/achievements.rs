@@ -152,7 +152,9 @@ impl AchievementStore {
             persona: persona.map(|s| s.to_string()),
         });
 
-        let _ = self.save();
+        if let Err(e) = self.save() {
+            tracing::warn!("failed to save achievements: {e}");
+        }
         Some(badge)
     }
 

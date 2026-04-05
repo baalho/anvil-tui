@@ -146,6 +146,18 @@ pub fn build_system_prompt(
         prompt.push_str("- Available tools may differ from host environment.\n");
     }
 
+    // --- Layer 4e: Repo map (semi-static) ---
+    // Scans workspace for source files and extracts top-level symbols.
+    // Gives the model awareness of the codebase structure without manual context.
+    let repo_map = crate::repo_map::RepoMap::scan(workspace);
+    if repo_map.file_count() > 0 {
+        let map_summary = repo_map.summary(8000);
+        if !map_summary.is_empty() {
+            prompt.push('\n');
+            prompt.push_str(&map_summary);
+        }
+    }
+
     // --- Layer 5: Dynamic content (changes every turn) ---
     // Environment info and memory go last so the prefix above stays stable.
     prompt.push_str("\n## Environment\n");
@@ -572,7 +584,10 @@ mod tests {
             .find("LAYER4_CONTEXT_MARKER")
             .expect("context marker missing");
         // Layer 4c: project detection (semi-static)
-        let layer4c = prompt.find("## Project").expect("project section missing");
+        // Use "## Project\n" to avoid matching "## Project Context" header
+        let layer4c = prompt
+            .find("## Project\n")
+            .expect("project section missing");
         // Layer 5a: environment (dynamic)
         let layer5a = prompt
             .find("## Environment")

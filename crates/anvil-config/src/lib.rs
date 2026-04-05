@@ -99,16 +99,15 @@ pub fn init_harness(dir: &Path) -> Result<PathBuf> {
     if !config_path.exists() {
         let defaults = Settings::default();
         let mut content = toml::to_string_pretty(&defaults)?;
-        // Append example profiles as comments
+        // Append default launch profiles — sparkle works out of the box
         content.push_str(
             "\n\n# Launch profiles — use with: anvil --profile <name>\n\
-             # [[profiles]]\n\
-             # name = \"sparkle\"\n\
-             # persona = \"sparkle\"\n\
-             # mode = \"creative\"\n\
-             # skills = [\"cool-stuff\", \"story-mode\"]\n\
-             # model = \"qwen3:30b\"\n\
-             #\n\
+             [[profiles]]\n\
+             name = \"sparkle\"\n\
+             persona = \"sparkle\"\n\
+             mode = \"creative\"\n\
+             skills = [\"cool-stuff\", \"story-mode\"]\n\
+             \n\
              # [[profiles]]\n\
              # name = \"code\"\n\
              # mode = \"coding\"\n\

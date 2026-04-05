@@ -72,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "anvil"
-version = "3.0.0"
+version = "3.2.0"
 dependencies = [
  "anvil-agent",
  "anvil-config",
@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-agent"
-version = "3.0.0"
+version = "3.2.0"
 dependencies = [
  "anvil-config",
  "anvil-llm",
@@ -114,6 +114,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "toml",
  "tracing",
  "uuid",
  "wiremock",
@@ -121,7 +122,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-config"
-version = "3.0.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -136,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-llm"
-version = "3.0.0"
+version = "3.2.0"
 dependencies = [
  "anvil-config",
  "anyhow",
@@ -155,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-mcp"
-version = "3.0.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -169,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-tools"
-version = "3.0.0"
+version = "3.2.0"
 dependencies = [
  "anvil-config",
  "anyhow",

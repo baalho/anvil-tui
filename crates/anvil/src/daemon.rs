@@ -227,7 +227,10 @@ pub async fn run_daemon(mut agent: Agent, watch_config: Option<DaemonWatchConfig
                     session_id: None,
                 };
 
-                let _ = dispatch_event(&mut agent, event, &reply_tx, perm_rx, cancel).await;
+                if let Err(e) = dispatch_event(&mut agent, event, &reply_tx, perm_rx, cancel).await
+                {
+                    tracing::warn!("dispatch failed: {e}");
+                }
 
                 // reply_tx is dropped here, closing the channel.
                 // The connection handler's recv loop exits cleanly.
@@ -267,7 +270,9 @@ pub async fn run_daemon(mut agent: Agent, watch_config: Option<DaemonWatchConfig
                         }
                     }
                 });
-                let _ = dispatch_event(&mut agent, event, &log_tx, perm_rx, cancel).await;
+                if let Err(e) = dispatch_event(&mut agent, event, &log_tx, perm_rx, cancel).await {
+                    tracing::warn!("file-change dispatch failed: {e}");
+                }
             }
 
             DaemonTask::Status { reply_tx } => {

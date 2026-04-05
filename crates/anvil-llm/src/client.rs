@@ -12,6 +12,10 @@
 //! The client can inject model-specific sampling params (temperature, top_p, min_p,
 //! repeat_penalty) into every request. These come from model profiles loaded by
 //! the agent. Call `set_sampling()` after loading a profile.
+//!
+//! # `let _ = tx.send(...)` pattern
+//! Stream event channel sends use `let _ =` — the receiver may drop during
+//! cancellation. A failed send means the consumer stopped listening.
 
 use crate::message::{ChatRequest, ChatResponse};
 use crate::retry::{self, RetryConfig};

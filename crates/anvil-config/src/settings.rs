@@ -31,6 +31,9 @@ pub struct Settings {
     /// a single `anvil --profile <name>` flag.
     #[serde(default)]
     pub profiles: Vec<LaunchProfile>,
+    /// Long-running harness settings (planner/generator/evaluator).
+    #[serde(default)]
+    pub harness: HarnessSettings,
 }
 
 /// A named launch profile that bundles startup configuration.
@@ -129,6 +132,67 @@ pub struct AgentSettings {
     /// Defaults to a safe set if not specified.
     #[serde(default)]
     pub kids_allowed_commands: Option<Vec<String>>,
+}
+
+/// Controls the long-running multi-agent harness (planner/generator/evaluator).
+///
+/// The harness decomposes complex tasks into sprints, implements each with a
+/// fresh agent (context reset), and evaluates the result with a separate critic
+/// agent. Designed for 64GB local LLM setups where context is scarce.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessSettings {
+    /// Maximum number of sprints the planner can create.
+    #[serde(default = "default_harness_max_sprints")]
+    pub max_sprints: usize,
+    /// Maximum retry attempts per sprint when the evaluator fails it.
+    #[serde(default = "default_harness_max_retries")]
+    pub max_retries_per_sprint: usize,
+    /// Total token budget across all harness phases.
+    #[serde(default = "default_harness_max_tokens")]
+    pub max_total_tokens: u64,
+    /// Wall-clock timeout in minutes for the entire harness run.
+    #[serde(default = "default_harness_max_duration")]
+    pub max_duration_minutes: u64,
+    /// Model to use for the planner agent. Empty = use default model.
+    #[serde(default)]
+    pub planner_model: String,
+    /// Model to use for the evaluator agent. Empty = use default model.
+    /// Can be a smaller/faster model since the evaluator only reads and judges.
+    #[serde(default)]
+    pub evaluator_model: String,
+    /// Maximum turns per generator sprint before forcing completion.
+    #[serde(default = "default_harness_sprint_turn_limit")]
+    pub sprint_turn_limit: usize,
+}
+
+impl Default for HarnessSettings {
+    fn default() -> Self {
+        Self {
+            max_sprints: default_harness_max_sprints(),
+            max_retries_per_sprint: default_harness_max_retries(),
+            max_total_tokens: default_harness_max_tokens(),
+            max_duration_minutes: default_harness_max_duration(),
+            planner_model: String::new(),
+            evaluator_model: String::new(),
+            sprint_turn_limit: default_harness_sprint_turn_limit(),
+        }
+    }
+}
+
+fn default_harness_max_sprints() -> usize {
+    10
+}
+fn default_harness_max_retries() -> usize {
+    3
+}
+fn default_harness_max_tokens() -> u64 {
+    500_000
+}
+fn default_harness_max_duration() -> u64 {
+    120
+}
+fn default_harness_sprint_turn_limit() -> usize {
+    20
 }
 
 /// Controls tool execution behavior — timeouts and output size limits.

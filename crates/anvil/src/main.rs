@@ -1,9 +1,13 @@
 mod backend;
 mod client;
 mod commands;
+mod context;
 mod daemon;
+mod display;
 mod interactive;
 mod ipc;
+mod prompts;
+mod ralph;
 pub mod render;
 mod watcher;
 pub mod zellij;
@@ -11,7 +15,7 @@ pub mod zellij;
 use anvil_agent::{Agent, AgentEvent, McpManager, McpServerConfig, SessionStore};
 use anvil_config::{data_dir, load_settings, Settings};
 use anvil_tools::PermissionDecision;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -202,6 +206,32 @@ async fn main() -> Result<()> {
         }
         None => {
             let mut settings = load_settings(&workspace)?;
+
+            // Validate launch profile exists before doing model discovery.
+            // Fail fast with a clear error instead of printing model info first.
+            if let Some(profile_name) = &cli.profile {
+                let found = settings
+                    .profiles
+                    .iter()
+                    .any(|p| p.name.eq_ignore_ascii_case(profile_name));
+                if !found {
+                    let available: Vec<&str> =
+                        settings.profiles.iter().map(|p| p.name.as_str()).collect();
+                    if available.is_empty() {
+                        bail!(
+                            "no profile '{}' found. Add [[profiles]] to .anvil/config.toml",
+                            profile_name
+                        );
+                    } else {
+                        bail!(
+                            "no profile '{}'. available: {}",
+                            profile_name,
+                            available.join(", ")
+                        );
+                    }
+                }
+            }
+
             auto_detect_model(&mut settings).await;
 
             // Load model profiles and apply matching profile's sampling params
@@ -238,13 +268,12 @@ async fn main() -> Result<()> {
                 agent.apply_model_profile(profile);
             }
 
-            // Apply launch profile if --profile was given
+            // Apply launch profile (already validated above)
             if let Some(profile_name) = &cli.profile {
-                // workspace was moved into Agent::new — retrieve it back via the agent
                 let ws = agent.workspace().to_path_buf();
                 apply_launch_profile(&mut agent, &settings, profile_name, &ws)?;
                 // Remember this profile for next time
-                let _ = anvil_config::save_last_profile(profile_name);
+                let _ = anvil_config::save_last_profile(profile_name); // intentional: best-effort persistence
             }
 
             // Warn if Ollama backend without OLLAMA_NUM_CTX set

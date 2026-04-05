@@ -5,7 +5,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-## [v3.0.0] — 2025-07-25 — Complete Feature Release
+## [v3.2.0] — 2026-04-05 — Long-Running Harness for Local LLMs
+
+### Added
+- **Multi-agent harness**: `/harness <prompt> --verify <cmd>` decomposes tasks into sprints using a planner agent, implements each with a generator agent (fresh context per sprint), and evaluates with a separate evaluator agent. Adapted from the Anthropic harness design article for 64GB local LLM setups.
+- **Context resets**: Each harness agent gets a fresh `Agent` instance — no shared context window. Communication via structured files in `.anvil/harness/` (plan.md, handoff.md, eval.md, state.toml). Context resets replace compaction for long-running tasks.
+- **Planner agent**: Decomposes tasks into ordered sprints with acceptance criteria. No tool definitions (pure text generation saves ~1K tokens). Tolerant parser falls back to single-sprint plan if model output is unstructured.
+- **Evaluator agent**: Skeptical critic with limited tools (shell, file_read, grep — no write access). Runs verify command, grades against criteria, outputs PASS/FAIL. Can use a smaller/faster model via `[harness] evaluator_model`.
+- **Harness configuration**: `[harness]` section in config.toml — max_sprints, max_retries_per_sprint, max_total_tokens, max_duration_minutes, planner_model, evaluator_model, sprint_turn_limit.
+- **`/harness status`**: Shows current sprint, attempt, token usage, and run status.
+- **`/harness resume`**: Continues from last completed sprint using saved state.
+- **`/harness cancel`**: Marks current run as cancelled.
+- **`Agent::with_system_prompt()`**: Constructor for creating agents with custom system prompts and optional model overrides. Used by the harness orchestrator.
+
+### Changed
+- `Agent` now exposes `settings()` accessor for harness orchestrator to clone settings for sub-agents.
+- `RepoMap` gains `empty()` constructor for harness agents that don't need workspace scanning.
+
+## [v3.1.0] — 2026-04-05 — Audit Response & Product Hardening
+
+### Security
+- **TOCTOU fix**: File write operations use `O_NOFOLLOW` on Unix to prevent symlink attacks
+- **Sandbox metacharacter injection**: Kids sandbox rejects shell metacharacters (`;`, `|`, `&`, backticks, `$()`, `>`, `<`)
+- **Bare interpreter blocking**: Kids sandbox requires script file argument — blocks `python3` with no args (stdin injection)
+- **Symlink write protection**: `safe_write()` rejects writes through symlinks with `ELOOP` detection
+- **`let _ =` audit**: Fixed 5 fire-and-forget patterns that silently dropped errors (achievements, FTS, daemon dispatch, usage persistence); documented remaining 85 as intentional with module-level comments
+
+### Added
+- **Repo map**: Auto-scans workspace for source files and extracts symbols (functions, structs, classes) using regex. Injected into system prompt. Auto-includes relevant files when user mentions a symbol. `/map` and `/refresh` commands
+- **Context files**: `.anvil/context/` overflow system replaces Zellij pane integration. Long tool output saved to timestamped files. `/context list|show|clean` commands
+- **Auto-commit awareness**: Warns when >10 uncommitted changes after file-modifying turns. `/commit` command shows status
+- **Guided projects for kids**: `/project list|start|next|hint` with 3 bundled projects (My First Website, Number Guessing Game, Story Bot). Step-by-step prompts with hints and verification
+- **Kids content guardrails**: KidsRenderer limits response length (2000 chars), strips Python tracebacks/warnings, maps sandbox errors to kid-friendly messages
+- **Launch profile validation**: `anvil -p sparkle` fails fast with clear error if profile doesn't exist, before model discovery
+- **Default sparkle profile**: `anvil init` creates an uncommented sparkle profile that works out of the box
+- **`cargo audit` in CI**: Security advisory checking on every push
+
+### Changed
+- **Decomposed `interactive.rs`**: 1,355 → 754 lines. Extracted `display.rs` (banners, spinners, formatting), `prompts.rs` (input, permissions), `ralph.rs` (autonomous loop)
+- **Fixed CHANGELOG dates**: All version dates now match actual git commit dates (were 9 months off)
+
+### Fixed
+- **LICENSE file**: Added Apache-2.0 license (was missing entirely)
+- **Git tags**: Created tags v0.1.0 through v3.0.0 at correct commits
+
+## [v3.0.0] — 2026-04-05 — Complete Feature Release
 
 All 6 deferred features implemented. No more "future" hedging.
 
@@ -48,7 +92,7 @@ All 6 deferred features implemented. No more "future" hedging.
 - Interactive loop uses `render_tool_output` instead of
   `render_tool_result` for structured output support.
 
-## [v2.2.0] — 2025-07-25 — Kids Mode Overhaul
+## [v2.2.0] — 2026-04-04 — Kids Mode Overhaul
 
 ### Added
 - **Per-profile base_url** — `LaunchProfile` gains `base_url` field for
@@ -88,7 +132,7 @@ All 6 deferred features implemented. No more "future" hedging.
 - `V2.2_ARCHITECTURE_REVIEW.md` — content folded into AGENTS.md.
 - Stale branches: `feat/v1.2.0-infra-ux`, `spec/full-roadmap-v1`.
 
-## [v2.1.0] — 2025-07-17 — The Stability Update
+## [v2.1.0] — 2026-04-03 — The Stability Update
 
 ### Fixed
 - **Workspace bleed** — daemon socket path is now workspace-scoped via
@@ -114,7 +158,7 @@ All 6 deferred features implemented. No more "future" hedging.
   `clear_turn_messages()` — incremental message persistence.
 - 13 new tests (5 ledger, 5 turn_messages, 3 workspace-scoped sockets).
 
-## [v2.0.0] — 2025-07-17 — The Asynchronous Daemon
+## [v2.0.0] — 2026-04-03 — The Asynchronous Daemon
 
 ### Added
 - **Daemon mode** — `anvil daemon start` runs Anvil as a background
@@ -146,7 +190,7 @@ All 6 deferred features implemented. No more "future" hedging.
 - **Zero changes to anvil-agent** — the v1.9 Event abstraction held.
   The daemon is a new event producer, not a new event consumer.
 
-## [v1.9.0] — 2025-07-17 — Bridge to v2.0
+## [v1.9.0] — 2026-04-03 — Bridge to v2.0
 
 ### Added
 - **Session snapshots** — `SessionSnapshot` persists agent state (mode,
@@ -177,7 +221,7 @@ All 6 deferred features implemented. No more "future" hedging.
   without introducing IPC, process supervision, or socket management.
   Every line of v1.9 code is load-bearing in v2.0.
 
-## [v1.8.0] — 2025-07-17 — BYOB TurboQuant & Ops Platform
+## [v1.8.0] — 2026-04-03 — BYOB TurboQuant & Ops Platform
 
 ### Added
 - **TurboQuant KV cache profiles** — `KvCacheConfig` struct with `type_k`,
@@ -210,7 +254,7 @@ All 6 deferred features implemented. No more "future" hedging.
   server processes. Zellij layouts handle backend lifecycle. This follows
   the "prefer boring over clever" principle from AGENTS.md.
 
-## [v1.7.0] — 2025-07-17 — MLX Hardening Edition
+## [v1.7.0] — 2026-04-02 — MLX Hardening Edition
 
 ### Added
 - **MLX tool_choice fallback** — when a backend rejects `tool_choice`
@@ -385,7 +429,7 @@ All 6 deferred features implemented. No more "future" hedging.
 - MANUAL.md described memory/ as "reserved for future use" (fully implemented)
 - MANUAL.md incorrectly stated anvil-tools has no internal dependencies (depends on anvil-config)
 
-## [v1.1.0] — 2025-04-01
+## [v1.1.0] — 2026-04-01
 
 ### Added
 - MCP (Model Context Protocol) client — connect to external tool servers
@@ -408,7 +452,7 @@ All 6 deferred features implemented. No more "future" hedging.
 - System prompt reordered for KV cache efficiency
 - Plugin name validation includes git tools
 
-## [v1.0.0] — 2025-03-31
+## [v1.0.0] — 2026-03-31
 
 ### Added
 - Ctrl+C cancellation via `CancellationToken`
@@ -433,7 +477,7 @@ All 6 deferred features implemented. No more "future" hedging.
 - CI on Linux, macOS ARM, Windows/WSL
 - Install script for macOS and Linux
 
-## [v0.1.0] — 2025-03-30
+## [v0.1.0] — 2026-03-30
 
 ### Added
 - Interactive mode with readline-style input and streaming output

@@ -108,9 +108,16 @@ impl TerminalCapabilities {
 ///
 /// This is the default renderer for standard interactive mode. Uses ANSI
 /// colors for tool results, errors, and status messages.
+///
+/// # `let _ =` pattern
+/// Terminal write operations (`crossterm::execute!`, `write!`, `flush`) use
+/// `let _ =` throughout this module. Terminal output failures are unrecoverable
+/// — if stdout is broken, there's nothing useful to do with the error.
 #[derive(Default)]
 pub struct TerminalRenderer {
     capabilities: TerminalCapabilities,
+    /// Workspace path for context file overflow.
+    workspace: Option<std::path::PathBuf>,
 }
 
 impl TerminalRenderer {
@@ -120,7 +127,15 @@ impl TerminalRenderer {
 
     /// Create a renderer with detected terminal capabilities.
     pub fn with_capabilities(capabilities: TerminalCapabilities) -> Self {
-        Self { capabilities }
+        Self {
+            capabilities,
+            workspace: None,
+        }
+    }
+
+    /// Set the workspace path for context file overflow.
+    pub fn set_workspace(&mut self, workspace: std::path::PathBuf) {
+        self.workspace = Some(workspace);
     }
 
     /// Get the terminal capabilities.
@@ -317,10 +332,16 @@ impl Renderer for TerminalRenderer {
     fn render_tool_output(&self, tool_name: &str, icon: &str, output: &anvil_tools::ToolOutput) {
         let text = output.text();
 
-        // If inside Zellij and output is long, send full content to a pane
-        if self.capabilities.zellij && text.lines().count() > 50 {
-            let title = format!("{icon} {tool_name}");
-            crate::zellij::ZellijPanes::open_pane_with_file(&title, text);
+        // Save overflow output to context file if it's long
+        if let Some(workspace) = self.workspace.as_ref() {
+            if let Ok(Some(path)) = crate::context::save_overflow(workspace, tool_name, text) {
+                let _ = crossterm::execute!(
+                    std::io::stdout(),
+                    crossterm::style::SetForegroundColor(crossterm::style::Color::DarkGrey),
+                    crossterm::style::Print(format!("  [full output: {}]\n", path.display())),
+                    crossterm::style::ResetColor,
+                );
+            }
         }
 
         match output {
@@ -438,6 +459,8 @@ impl Renderer for TerminalRenderer {
 /// it calls the same `Renderer` trait methods uniformly.
 pub struct KidsRenderer {
     inner: TerminalRenderer,
+    /// Track content length to limit verbose responses.
+    content_chars: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for KidsRenderer {
@@ -447,9 +470,13 @@ impl Default for KidsRenderer {
 }
 
 impl KidsRenderer {
+    /// Max characters of LLM content to show kids (prevents walls of text).
+    const MAX_CONTENT_CHARS: usize = 2000;
+
     pub fn new() -> Self {
         Self {
             inner: TerminalRenderer::new(),
+            content_chars: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -457,12 +484,33 @@ impl KidsRenderer {
     pub fn with_capabilities(capabilities: TerminalCapabilities) -> Self {
         Self {
             inner: TerminalRenderer::with_capabilities(capabilities),
+            content_chars: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
 
 impl Renderer for KidsRenderer {
     fn render_content_delta(&self, text: &str) {
+        use std::sync::atomic::Ordering;
+        let current = self.content_chars.fetch_add(text.len(), Ordering::Relaxed);
+        if current > Self::MAX_CONTENT_CHARS {
+            // Already past limit — suppress
+            return;
+        }
+        if current + text.len() > Self::MAX_CONTENT_CHARS {
+            // This chunk crosses the limit — show truncation marker
+            let remaining = Self::MAX_CONTENT_CHARS - current;
+            if remaining > 0 {
+                self.inner.render_content_delta(&text[..remaining]);
+            }
+            let _ = crossterm::execute!(
+                io::stdout(),
+                SetForegroundColor(Color::DarkGrey),
+                Print("\n  [...]\n"),
+                ResetColor,
+            );
+            return;
+        }
         self.inner.render_content_delta(text);
     }
 
@@ -495,7 +543,7 @@ impl Renderer for KidsRenderer {
 
     fn render_tool_result(&self, tool_name: &str, _icon: &str, result_text: &str) {
         if tool_name == "shell" {
-            // Strip shell metadata — kids see only program output
+            // Strip shell metadata, technical jargon, and file paths
             let clean: String = result_text
                 .lines()
                 .map(|l| l.trim())
@@ -504,7 +552,12 @@ impl Renderer for KidsRenderer {
                         && !line.starts_with("stdout:")
                         && !line.starts_with("stderr:")
                         && !line.starts_with("error: command timed out")
+                        && !line.starts_with("Traceback")
+                        && !line.contains("SyntaxWarning")
+                        && !line.contains("DeprecationWarning")
+                        && !line.starts_with("  File \"")
                 })
+                .take(30) // Limit output to 30 lines for kids
                 .collect::<Vec<_>>()
                 .join("\n");
             if !clean.trim().is_empty() {
@@ -532,14 +585,26 @@ impl Renderer for KidsRenderer {
     }
 
     fn render_error(&self, message: &str) {
-        // Show kid-friendly error instead of raw message
+        // Map technical errors to kid-friendly messages
+        let friendly = if message.contains("special characters") {
+            "  ✨ *oops, let me try a different way!*\n"
+        } else if message.contains("kids mode") || message.contains("isn't available") {
+            "  ✨ *hmm, I can't do that one — let me try something else!*\n"
+        } else if message.contains("needs a script file") {
+            "  ✨ *let me write that to a file first!*\n"
+        } else if message.contains("timed out") {
+            "  ⏰ *that took too long! let me try again...*\n"
+        } else if message.contains("connection") || message.contains("refused") {
+            "  🤔 *my brain isn't responding — is the AI running?*\n"
+        } else {
+            "  🤔 *hmm, something went wonky! let me try again...*\n"
+        };
         let _ = crossterm::execute!(
             io::stdout(),
             SetForegroundColor(Color::Yellow),
-            Print("  🤔 *hmm, something went wonky! let me try again...*\n"),
+            Print(friendly),
             ResetColor,
         );
-        let _ = message; // suppress unused warning
     }
 
     fn render_info(&self, message: &str) {
